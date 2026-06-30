@@ -1,0 +1,42 @@
+import { listVoiceChannels } from '@/lib/discord';
+import { getSelectedGuildId } from '@/lib/guild';
+import { getMusicState, type MusicState } from '@/lib/control';
+import MusicPlayer from './MusicPlayer';
+
+export const dynamic = 'force-dynamic';
+
+const EMPTY: MusicState = {
+  current: null,
+  queue: [],
+  loop: 'off',
+  effect: 'off',
+  intensity: 50,
+  volume: 100,
+  positionSec: 0,
+  playbackRate: 1,
+  paused: false,
+  channelName: null,
+};
+
+export default async function MusicPage() {
+  const guildId = await getSelectedGuildId();
+  const [channels, initialState] = await Promise.all([
+    listVoiceChannels(guildId).catch(() => []),
+    guildId ? getMusicState(guildId).catch(() => EMPTY) : Promise.resolve(EMPTY),
+  ]);
+
+  return (
+    <main>
+      <h1>Music</h1>
+      <p className="sub">Play YouTube audio in a voice channel and control the queue live.</p>
+
+      <MusicPlayer channels={channels} initialState={initialState} />
+
+      <p className="hint">
+        {channels.length === 0
+          ? 'No voice channels found — check the bot token / that the bot is in the server.'
+          : 'The bot joins the channel you pick. Search by name or paste a YouTube/playlist URL.'}
+      </p>
+    </main>
+  );
+}

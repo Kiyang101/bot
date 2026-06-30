@@ -1,0 +1,22 @@
+# Secrets — never commit these
+.env
+.env.local
+dashboard/.env.local
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.next/
+dashboard/.next/
+*.tsbuildinfo
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# Runtime data (per-server settings)
+data/
+.megu/
