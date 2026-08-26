@@ -1,10 +1,9 @@
 import './globals.css';
 import type { ReactNode } from 'react';
-import { headers } from 'next/headers';
 import { listGuilds } from '@/lib/discord';
-import { getSelectedGuildId } from '@/lib/guild';
+import { getSelectedGuildId, lockedGuildId } from '@/lib/guild';
 import { getSessionUser } from '@/lib/session';
-import { canAccess, forcedGuildId, requestHost } from '@/lib/auth';
+import { canAccess } from '@/lib/auth';
 import GuildSwitcher from './GuildSwitcher';
 
 export const metadata = {
@@ -31,15 +30,15 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
     );
   }
 
-  const [guilds, current] = await Promise.all([
+  const [guilds, current, locked] = await Promise.all([
     listGuilds().catch(() => []),
     getSelectedGuildId(),
+    lockedGuildId(),
   ]);
 
-  // Remote (ngrok) visitors are locked to a single server: show only that one.
-  const hdrs = await headers();
-  const forced = forcedGuildId(requestHost((n) => hdrs.get(n)));
-  const visibleGuilds = forced ? guilds.filter((g) => g.id === forced) : guilds;
+  // Visitors locked to a single server (remote/ngrok guests, or no-login
+  // /dashboard-link guests) see only that one — they can't switch away.
+  const visibleGuilds = locked ? guilds.filter((g) => g.id === locked) : guilds;
 
   const avatarUrl = user.avatar
     ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64`

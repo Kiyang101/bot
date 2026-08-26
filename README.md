@@ -13,8 +13,10 @@ folders, so adding a feature is usually just dropping in a new file.
 
 - **🎵 Music player** — stream audio from YouTube (URLs, playlists, or search
   terms) with a full queue, loop modes, shuffle, seek, volume, and audio
-  effects. Audio is pulled with `yt-dlp` via the bundled `youtube-dl-exec`, so
-  no separate install is needed.
+  effects. Spotify track, album, and playlist links are resolved to matching
+  YouTube tracks; `/play liked` can import Spotify Liked Songs when configured.
+  Audio is pulled with `yt-dlp` via the bundled `youtube-dl-exec`, so no
+  separate install is needed.
 - **🗣️ Text-to-speech** — `/say` makes the bot speak in your voice channel, and
   `/sayjp` speaks in a Japanese anime voice via [VOICEVOX](https://voicevox.hiroshiba.jp/).
   Pluggable TTS providers (OpenAI, Gemini, VOICEVOX, Google Translate TTS).
@@ -31,7 +33,7 @@ folders, so adding a feature is usually just dropping in a new file.
 | `/ping` | Replies with Pong and the bot latency. |
 | `/help` | Lists all available commands. |
 | `/server` | Shows information about this server. |
-| `/play` | Play a song or playlist from YouTube (URL or search terms). |
+| `/play` | Play YouTube audio, a Spotify link, or Spotify Liked Songs (`liked`). |
 | `/pause` · `/resume` | Pause / resume the current track. |
 | `/skip` · `/stop` | Skip the track / stop and leave the channel. |
 | `/queue` · `/nowplaying` | Show the queue / the current track. |
@@ -87,8 +89,13 @@ Open `.env` and fill in at least `DISCORD_TOKEN` and `CLIENT_ID`. For instant
 command updates while developing, set `GUILD_ID` to your test server's ID
 (enable **Developer Mode** in Discord → User Settings → Advanced, then
 right-click your server → **Copy Server ID**). The other variables (AI providers,
-VOICEVOX, music tuning, dashboard control secret) are documented inline in
+VOICEVOX, music tuning, Spotify integration, dashboard control secret) are documented inline in
 `.env.example` and are all optional.
+
+Keep the populated `.env` file local. It is ignored by Git and must never be
+committed; `.env.example` is the safe template to commit. The same rule applies
+to `dashboard/.env.local`; `dashboard/.env.example` contains blank placeholders
+and is safe to commit.
 
 ### 4. Start PostgreSQL and run migrations
 
@@ -154,7 +161,23 @@ npm run dev                  # http://localhost:3000
 
 Set `BOT_CONTROL_SECRET` to the **same** random string in both the root `.env`
 and `dashboard/.env.local` so the dashboard can authenticate to the bot's
-control endpoint.
+control endpoint. For Discord OAuth login, also set `DISCORD_CLIENT_SECRET`,
+`OAUTH_REDIRECT_URI`, and `AUTH_SECRET` in `dashboard/.env.local`, then add the
+redirect URI to the application's OAuth2 settings. Grant access with
+`ADMIN_USER_IDS` and/or `MEMBER_USER_IDS`; `DEV_AUTH_BYPASS=admin` is available
+for local development only and should remain blank in production.
+
+Local admins can use the **Start bot** and **Stop bot**
+controls on the Voice Activity page; start uses `BOT_START_COMMAND` (default
+`npm run start`) from `BOT_WORKDIR`, and stop requests a graceful shutdown.
+The lifecycle state and last PID are stored in the `BotRuntime` database row.
+
+For a production dashboard host, set these in `dashboard/.env.local`:
+
+```env
+BOT_WORKDIR=..
+BOT_START_COMMAND=npm run prod
+```
 
 ## npm scripts
 

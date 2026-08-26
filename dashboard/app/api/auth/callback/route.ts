@@ -5,6 +5,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import {
   STATE_COOKIE,
   SESSION_COOKIE,
+  GUEST_LINK_COOKIE,
   createSession,
   exchangeCodeForUser,
   roleForUser,
@@ -51,6 +52,8 @@ export async function GET(req: NextRequest) {
 
   const res = NextResponse.redirect(new URL(homePathFor(role), req.url));
   res.cookies.delete(STATE_COOKIE);
+  // Drop any no-login link-guest lock now that they're a real, switch-capable user.
+  res.cookies.delete(GUEST_LINK_COOKIE);
   res.cookies.set(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: 'lax',

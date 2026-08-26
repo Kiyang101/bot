@@ -22,6 +22,7 @@ import type { TtsProvider } from '../lib/voiceAI/providers/types';
 import { musicManager } from '../lib/music/musicSession';
 import { resolve as resolveTracks } from '../lib/music/ytdlp';
 import type { LoopMode, MusicState, Effect } from '../lib/music/types';
+import { prisma } from '../lib/db';
 
 interface SpeakBody {
   channelId?: string;
@@ -156,7 +157,7 @@ function emptyMusicState(): MusicState {
     loop: 'off',
     effect: 'off',
     intensity: 50,
-    volume: 100,
+    volume: 50,
     positionSec: 0,
     playbackRate: 1,
     paused: false,
@@ -185,16 +186,34 @@ async function handleMusic(client: Client, body: MusicBody): Promise<Record<stri
     if (!channel || !channel.isVoiceBased()) {
       throw new Error('channelId is not a voice channel the bot can see');
     }
+    if (channel.guild?.id !== guildId) {
+      throw new Error('channelId belongs to a different Discord server than guildId');
+    }
 
     const { tracks, kind } = await resolveTracks(query, 'dashboard', 'Dashboard');
     if (tracks.length === 0) throw new Error('No results found for that query.');
-    // A free-text search enqueues just the top hit; URLs/playlists enqueue all.
+    // A free-text search enqueues just the top hit; URLs/playlists/Spotify
+    // imports enqueue all resolved tracks.
     const chosen = kind === 'search' ? [tracks[0]] : tracks;
 
     const session = musicManager.getOrCreate(guildId);
     const { added, startedNow } = await session.enqueue(channel as VoiceBasedChannel, null, chosen);
     const title = chosen[0]?.title ?? 'track';
-    return { added, startedNow, kind, title };
+    return {
+      added,
+      startedNow,
+      kind,
+      title,
+      // Return the resolved tracks so the dashboard can persist canonical URLs
+      // and replay history without resolving an old search term again.
+      tracks: chosen.map((track) => ({
+        title: track.title,
+        url: track.url,
+        durationSec: track.durationSec,
+        thumbnail: track.thumbnail,
+        uploader: track.uploader,
+      })),
+    };
   }
 
   // Every other action controls an existing session.
@@ -252,7 +271,7 @@ async function handleMusic(client: Client, body: MusicBody): Promise<Record<stri
 }
 
 /** Start the local control HTTP server. No-op if BOT_CONTROL_PORT is "0"/"off". */
-export function startControlServer(client: Client): void {
+export function startControlServer(client: Client, onStop: () => void): void {
   const portRaw = process.env.BOT_CONTROL_PORT ?? '8787';
   if (portRaw === '0' || portRaw.toLowerCase() === 'off') {
     console.log('[control] disabled (BOT_CONTROL_PORT=0)');
@@ -279,6 +298,20 @@ export function startControlServer(client: Client): void {
       return;
     }
 
+    if (req.method === 'GET' && path === '/status') {
+      if (!authorized(req)) {
+        sendJson(res, 401, { error: 'unauthorized' });
+        return;
+      }
+      try {
+        const runtime = await prisma.botRuntime.findUnique({ where: { id: 1 } });
+        sendJson(res, 200, { ok: true, runtime });
+      } catch (err) {
+        sendJson(res, 500, { error: err instanceof Error ? err.message : 'database unavailable' });
+      }
+      return;
+    }
+
     // Live music state for the dashboard (polled). Secret-guarded.
     if (req.method === 'GET' && path === '/music/state') {
       if (!authorized(req)) {
@@ -294,7 +327,7 @@ export function startControlServer(client: Client): void {
       return;
     }
 
-    const postRoutes = ['/speak', '/leave', '/music', '/preview'];
+    const postRoutes = ['/speak', '/leave', '/music', '/preview', '/lifecycle'];
     if (req.method !== 'POST' || !postRoutes.includes(path)) {
       sendJson(res, 404, { error: 'not found' });
       return;
@@ -307,6 +340,12 @@ export function startControlServer(client: Client): void {
     try {
       const raw = await readBody(req);
       const body = JSON.parse(raw || '{}') as SpeakBody & MusicBody & { guildId?: string };
+      if (path === '/lifecycle') {
+        if (body.action !== 'stop') throw new Error('unsupported lifecycle action');
+        sendJson(res, 202, { ok: true, status: 'STOPPING' });
+        setImmediate(onStop);
+        return;
+      }
       if (path === '/leave') {
         handleLeave(body);
         sendJson(res, 200, { ok: true });

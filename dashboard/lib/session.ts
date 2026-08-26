@@ -4,9 +4,11 @@
 import { cookies, headers } from 'next/headers';
 import {
   SESSION_COOKIE,
+  GUEST_LINK_COOKIE,
   verifySession,
   devBypassUser,
   guestUserForHost,
+  linkGuestUser,
   capRoleForHost,
   requestHost,
   type Role,
@@ -22,7 +24,12 @@ import {
 export async function getSessionUser(): Promise<SessionUser | null> {
   const hdrs = await headers();
   const host = requestHost((n) => hdrs.get(n));
-  const resolved = devBypassUser() ?? (await readCookieSession()) ?? guestUserForHost(host);
+  const store = await cookies();
+  const resolved =
+    devBypassUser() ??
+    (await readCookieSession()) ??
+    guestUserForHost(host) ??
+    linkGuestUser(store.get(GUEST_LINK_COOKIE)?.value);
   if (!resolved) return null;
   return capRoleForHost(resolved, host);
 }

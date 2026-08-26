@@ -1,6 +1,8 @@
 import { prisma } from '@/lib/prisma';
 import { getGuildInfo } from '@/lib/discord';
 import { getSelectedGuildId } from '@/lib/guild';
+import { readBotRuntime } from '@/lib/runtime';
+import BotControl from './BotControl';
 
 // Always render fresh (this is a live dashboard, not a static page).
 export const dynamic = 'force-dynamic';
@@ -17,16 +19,19 @@ export default async function LogsPage() {
   const guildId = await getSelectedGuildId();
   const where = guildId ? { guildId } : undefined;
 
-  const [events, total, guild] = await Promise.all([
+  const [events, total, guild, runtime] = await Promise.all([
     prisma.voiceEvent.findMany({ where, orderBy: { createdAt: 'desc' }, take: 100 }),
     prisma.voiceEvent.count({ where }),
     getGuildInfo(guildId).catch(() => null),
+    readBotRuntime().catch(() => null),
   ]);
 
   return (
     <main>
       <h1>Voice Activity</h1>
       <p className="sub">{guild ? `Server: ${guild.name}` : 'Recent voice channel activity'}</p>
+
+      <BotControl runtime={runtime} />
 
       <div className="cards">
         <div className="card">

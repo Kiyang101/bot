@@ -18,6 +18,25 @@ model GuildConfig {
   updatedAt    DateTime @updatedAt @default(now())
 }
 
+/// Singleton lifecycle record for the bot process, shared by the bot and dashboard.
+model BotRuntime {
+  id        Int       @id @default(1)
+  status    BotStatus @default(STOPPED)
+  pid       Int?
+  startedAt DateTime?
+  stoppedAt DateTime?
+  lastError String?
+  updatedAt DateTime  @updatedAt @default(now())
+}
+
+enum BotStatus {
+  STARTING
+  RUNNING
+  STOPPING
+  STOPPED
+  ERROR
+}
+
 /// One row per voice action, so the dashboard can show a history.
 model VoiceEvent {
   id              Int         @id @default(autoincrement())
@@ -32,6 +51,20 @@ model VoiceEvent {
   createdAt       DateTime    @default(now())
 
   @@index([guildId, createdAt]) // fast "recent events for this server" queries
+}
+
+/// A track requested from the dashboard, kept so it can be played again later.
+model MusicHistory {
+  id          Int      @id @default(autoincrement())
+  guildId     String
+  title       String
+  url         String
+  durationSec Int?
+  thumbnail   String?
+  uploader    String?
+  createdAt   DateTime @default(now())
+
+  @@index([guildId, createdAt]) // fast recent history queries for a server
 }
 
 enum VoiceAction {

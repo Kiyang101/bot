@@ -28,6 +28,7 @@ import { EFFECTS, DEFAULT_INTENSITY } from './types';
 import { createAudioStream, getStreamUrl, effectPlaybackRate, type AudioStream } from './ytdlp';
 import { nowPlayingEmbed, controlComponents } from './ui';
 import { registerDuckable, unregisterDuckable } from '../voice/ducking';
+import { prisma } from '../db';
 
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -39,9 +40,38 @@ function clampIntensity(n: number): number {
   return Math.min(100, Math.max(0, Math.round(n)));
 }
 
-const DEFAULT_VOLUME = Math.min(100, Math.max(0, envInt('MUSIC_DEFAULT_VOLUME', 100)));
-const IDLE_TIMEOUT_MS = envInt('MUSIC_IDLE_TIMEOUT_MS', 120_000);
+const DEFAULT_VOLUME = Math.min(100, Math.max(0, envInt('MUSIC_DEFAULT_VOLUME', 50)));
+const IDLE_TIMEOUT_MS = envInt('MUSIC_IDLE_TIMEOUT_MS', 30 * 60 * 1_000);
 const MAX_QUEUE = envInt('MUSIC_MAX_QUEUE', 100);
+
+/** Save only tracks that successfully started playing. */
+async function recordMusicHistory(guildId: string, track: Track): Promise<void> {
+  try {
+    const previous = await prisma.musicHistory.findFirst({
+      where: { guildId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { url: true },
+    });
+    // Only suppress an immediate repeat; the same track may be stored again
+    // after another track has become the latest history item.
+    if (previous?.url === track.url) return;
+
+    await prisma.musicHistory.create({
+      data: {
+        guildId,
+        title: track.title,
+        url: track.url,
+        durationSec:
+          track.durationSec == null ? null : Math.max(0, Math.round(track.durationSec)),
+        thumbnail: track.thumbnail,
+        uploader: track.uploader,
+      },
+    });
+  } catch (err) {
+    // A database failure must never interrupt audio playback.
+    console.error(`[music] failed to save history for guild ${guildId}:`, (err as Error).message);
+  }
+}
 
 class MusicSession {
   private readonly guildId: string;
@@ -181,6 +211,7 @@ class MusicSession {
       void this.advance();
       return;
     }
+    await recordMusicHistory(this.guildId, next);
     await this.postNowPlaying();
   }
 

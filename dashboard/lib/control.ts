@@ -5,6 +5,18 @@
 const CONTROL_URL = process.env.BOT_CONTROL_URL ?? 'http://127.0.0.1:8787';
 const CONTROL_SECRET = process.env.BOT_CONTROL_SECRET ?? '';
 
+export type BotStatus = 'STARTING' | 'RUNNING' | 'STOPPING' | 'STOPPED' | 'ERROR';
+
+export interface BotRuntime {
+  id: number;
+  status: BotStatus;
+  pid: number | null;
+  startedAt: string | null;
+  stoppedAt: string | null;
+  lastError: string | null;
+  updatedAt: string;
+}
+
 export interface SpeakPayload {
   channelId: string;
   text: string;
@@ -208,6 +220,41 @@ export async function sendLeave(guildId: string): Promise<void> {
     throw new Error(`Could not reach the bot at ${CONTROL_URL}. Make sure the bot is running.`);
   }
 
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Bot returned HTTP ${res.status}`);
+  }
+}
+
+/** Read the bot's live persisted lifecycle record through the control endpoint. */
+export async function getBotStatus(): Promise<BotRuntime> {
+  let res: Response;
+  try {
+    res = await fetch(`${CONTROL_URL}/status`, {
+      headers: { 'x-control-secret': CONTROL_SECRET },
+      cache: 'no-store',
+    });
+  } catch {
+    throw new Error(`Could not reach the bot at ${CONTROL_URL}. Is it running?`);
+  }
+  const data = (await res.json().catch(() => ({}))) as { runtime?: BotRuntime; error?: string };
+  if (!res.ok || !data.runtime) throw new Error(data.error ?? `Bot returned HTTP ${res.status}`);
+  return data.runtime;
+}
+
+/** Ask the running bot to shut down cleanly. */
+export async function sendBotStop(): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(`${CONTROL_URL}/lifecycle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-control-secret': CONTROL_SECRET },
+      body: JSON.stringify({ action: 'stop' }),
+      cache: 'no-store',
+    });
+  } catch {
+    throw new Error(`Could not reach the bot at ${CONTROL_URL}.`);
+  }
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(data.error ?? `Bot returned HTTP ${res.status}`);

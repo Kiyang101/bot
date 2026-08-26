@@ -11,20 +11,21 @@ import { searchSelect, formatDuration } from '../lib/music/ui';
 import { registerSearch } from '../lib/music/components';
 
 /**
- * `/play <query>` — play YouTube audio.
+ * `/play <query>` — play YouTube audio, or resolve a Spotify track/playlist.
  *
- * Accepts a video URL, a playlist URL, or free-text search. URLs/playlists are
- * enqueued immediately; a search shows a 5-result picker (handled by the
+ * Accepts a video URL, a playlist URL, a Spotify URL, the `liked` shortcut, or
+ * free-text search. URLs/playlists are enqueued immediately; a search shows a
+ * 5-result picker (handled by the
  * `music:pick` component in src/lib/music/components.ts).
  */
 const command: Command = {
   data: new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Play a song or playlist from YouTube (URL or search terms).')
+    .setDescription('Play YouTube audio, a Spotify link, or Spotify Liked Songs.')
     .addStringOption((opt) =>
       opt
         .setName('query')
-        .setDescription('YouTube URL, playlist URL, or search terms')
+        .setDescription('YouTube/Spotify URL, search terms, or "liked"')
         .setRequired(true)
         .setMaxLength(500),
     ),
@@ -72,9 +73,9 @@ const command: Command = {
         result.tracks,
       );
 
-      if (result.kind === 'playlist') {
+      if (result.kind === 'playlist' || result.kind === 'spotify-playlist' || result.kind === 'spotify-liked') {
         await interaction.editReply({
-          content: `📋 Queued **${added}** track(s) from the playlist.${
+          content: `📋 Queued **${added}** track(s) from ${result.label ?? 'the playlist'}.${
             startedNow ? ' Starting now ▶️' : ''
           }`,
         });

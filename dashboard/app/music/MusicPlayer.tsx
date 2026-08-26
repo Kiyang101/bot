@@ -5,7 +5,9 @@ import {
   playMusic,
   controlMusic,
   fetchMusicState,
+  fetchMusicHistory,
   type MusicActionState,
+  type MusicHistoryItem,
 } from '../actions';
 import { EFFECT_LABELS, type MusicState, type LoopMode, type Effect } from '@/lib/control';
 import SeekBar from './SeekBar';
@@ -49,13 +51,16 @@ const LOOP_LABEL: Record<LoopMode, string> = {
 export default function MusicPlayer({
   channels,
   initialState,
+  initialHistory,
 }: {
   channels: Channel[];
   initialState: MusicState;
+  initialHistory: MusicHistoryItem[];
 }) {
-  const [channelId, setChannelId] = useState('');
+  const [channelId, setChannelId] = useState(channels[0]?.id ?? '');
   const [query, setQuery] = useState('');
   const [state, setState] = useState<MusicState>(initialState);
+  const [history, setHistory] = useState<MusicHistoryItem[]>(initialHistory);
   const [volume, setVolume] = useState(initialState.volume);
   const [intensity, setIntensity] = useState(initialState.intensity);
   const [pending, setPending] = useState(false);
@@ -92,6 +97,26 @@ export default function MusicPlayer({
     };
   }, []);
 
+  // Refresh history with the same cadence as the live player state. This also
+  // picks up queued tracks when they actually start playing in the bot.
+  useEffect(() => {
+    let active = true;
+    async function refresh() {
+      try {
+        const items = await fetchMusicHistory();
+        if (active) setHistory(items);
+      } catch {
+        // Keep showing the last known history if the dashboard briefly loses
+        // database connectivity.
+      }
+    }
+    const id = setInterval(refresh, 3000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, []);
+
   // Advance the playhead ~4×/sec between polls so it moves smoothly. Scale by
   // the effect's playback rate so the position stays accurate under nightcore /
   // vaporwave (content time moves faster/slower than wall-clock).
@@ -112,6 +137,16 @@ export default function MusicPlayer({
     if (s) syncFromState(s);
   }
 
+  async function refreshHistory() {
+    try {
+      const items = await fetchMusicHistory();
+      setHistory(items);
+    } catch {
+      // A history refresh should not make an already-successful play request
+      // look like it failed.
+    }
+  }
+
   // Seek: optimistically jump the playhead, then tell the bot.
   async function handleSeek(sec: number) {
     posRef.current = { base: sec, at: Date.now() };
@@ -126,7 +161,25 @@ export default function MusicPlayer({
     try {
       const res = await playMusic(channelId, query);
       setResult(res);
-      if (res.ok) setQuery('');
+      if (res.ok) {
+        setQuery('');
+        await refreshHistory();
+      }
+      await refreshNow();
+    } catch {
+      setResult({ ok: false, message: '❌ Something went wrong sending the request.' });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function handleHistoryPlay(item: MusicHistoryItem) {
+    setPending(true);
+    setResult(null);
+    try {
+      const res = await playMusic(channelId, item.url);
+      setResult(res);
+      if (res.ok) await refreshHistory();
       await refreshNow();
     } catch {
       setResult({ ok: false, message: '❌ Something went wrong sending the request.' });
@@ -159,7 +212,8 @@ export default function MusicPlayer({
   const videoId = parseVideoId(np?.url);
 
   return (
-    <div className="music">
+    <div className="music-layout">
+      <div className="music">
       {/* Add to queue */}
       <form className="music-add" onSubmit={handlePlay}>
         <div className="row">
@@ -175,7 +229,7 @@ export default function MusicPlayer({
           </select>
           <input
             type="text"
-            placeholder="Song name or YouTube / playlist URL"
+            placeholder="Song, YouTube/Spotify URL, or liked"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             maxLength={500}
@@ -396,6 +450,50 @@ export default function MusicPlayer({
           </ol>
         )}
       </div>
+
+      </div>
+
+      <aside className="music-history" aria-label="Music history">
+        <div className="music-history-head">
+          <div>
+            <div className="section-title">Replay</div>
+            <h2>Music history</h2>
+          </div>
+          <span className="muted">{history.length}</span>
+        </div>
+        {history.length === 0 ? (
+          <p className="history-empty">Songs you play from the dashboard will appear here.</p>
+        ) : (
+          <ol className="history-list">
+            {history.map((item) => (
+              <li key={item.id}>
+                <button
+                  type="button"
+                  className="history-item"
+                  disabled={pending}
+                  onClick={() => void handleHistoryPlay(item)}
+                  title={`Play ${item.title}`}
+                >
+                  {item.thumbnail ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={item.thumbnail} alt="" className="history-thumb" />
+                  ) : (
+                    <span className="history-thumb placeholder">🎵</span>
+                  )}
+                  <span className="history-info">
+                    <span className="history-title">{item.title}</span>
+                    <span className="history-meta">
+                      {item.uploader ? `${item.uploader} • ` : ''}
+                      {fmt(item.durationSec)}
+                    </span>
+                  </span>
+                  <span className="history-play">▶</span>
+                </button>
+              </li>
+            ))}
+          </ol>
+        )}
+      </aside>
     </div>
   );
 }

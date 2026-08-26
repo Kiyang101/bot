@@ -11,6 +11,14 @@ import { SignJWT, jwtVerify } from 'jose';
 
 export const SESSION_COOKIE = 'megu_session';
 export const STATE_COOKIE = 'megu_oauth_state';
+// Which Discord server the dashboard is pinned to (set by the GuildSwitcher or a
+// ?guild= link). Declared here so the edge middleware can import it without
+// pulling in next/headers via lib/guild.
+export const GUILD_COOKIE = 'guildId';
+// Marks a no-login session granted by a server-scoped /dashboard link, holding
+// the guild that link is locked to. Distinct from GUILD_COOKIE so a logged-in
+// admin's normal server pin is never confused with a public guest lock.
+export const GUEST_LINK_COOKIE = 'megu_guest_guild';
 const SESSION_TTL = '7d';
 
 export type Role = 'admin' | 'member';
@@ -141,6 +149,33 @@ export function forcedGuildId(host: string | null | undefined): string | null {
   if (!id) return null;
   if (isLocalHost(host)) return null;
   return id;
+}
+
+/**
+ * Public no-login /dashboard links are off unless DASHBOARD_PUBLIC_LINK is set
+ * to "true"/"1". Until then a ?guild= link only pins the server for users who
+ * are already authenticated the normal way.
+ */
+export function publicLinkEnabled(): boolean {
+  const v = process.env.DASHBOARD_PUBLIC_LINK?.toLowerCase();
+  return v === 'true' || v === '1';
+}
+
+/**
+ * No-login guest granted by a server-scoped /dashboard link. When public links
+ * are enabled and the guest-link cookie names a guild, the visitor is treated as
+ * a member (Speak + Music only), locked to that one server. Returns null when
+ * the feature is off or there's no link cookie.
+ */
+export function linkGuestUser(guildFromCookie: string | undefined | null): SessionUser | null {
+  if (!publicLinkEnabled() || !guildFromCookie) return null;
+  return { id: 'guest', username: 'guest', avatar: null, role: 'member' };
+}
+
+/** The guild a /dashboard-link guest is locked to, or null if not applicable. */
+export function linkGuestGuildId(guildFromCookie: string | undefined | null): string | null {
+  if (!publicLinkEnabled() || !guildFromCookie) return null;
+  return guildFromCookie;
 }
 
 function secretKey(): Uint8Array {
