@@ -1,13 +1,13 @@
-// Clears the session cookie and returns to the login page.
 import { NextResponse, type NextRequest } from 'next/server';
-import { SESSION_COOKIE } from '@/lib/auth';
+import { cookies } from 'next/headers';
+import { createClient } from '@/lib/supabase/server';
 
 export const dynamic = 'force-dynamic';
 
-function logout(req: NextRequest) {
-  const res = NextResponse.redirect(new URL('/login', req.url));
-  res.cookies.delete(SESSION_COOKIE);
-  return res;
+async function logout(req: NextRequest) {
+  const supabase = createClient(await cookies());
+  await supabase.auth.signOut();
+  return NextResponse.redirect(new URL('/login', req.url));
 }
 
 export const GET = logout;

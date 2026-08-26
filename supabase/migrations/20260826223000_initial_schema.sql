@@ -7,17 +7,17 @@ CREATE TYPE public."VoiceAction" AS ENUM ('JOIN', 'LEAVE', 'MOVE');
 CREATE TABLE public."GuildConfig" (
   "guildId" text PRIMARY KEY,
   "logChannelId" text,
-  "updatedAt" timestamptz NOT NULL DEFAULT now()
+  "updatedAt" timestamp(3) without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE public."BotRuntime" (
   id integer PRIMARY KEY DEFAULT 1,
   status public."BotStatus" NOT NULL DEFAULT 'STOPPED',
   pid integer,
-  "startedAt" timestamptz,
-  "stoppedAt" timestamptz,
+  "startedAt" timestamp(3) without time zone,
+  "stoppedAt" timestamp(3) without time zone,
   "lastError" text,
-  "updatedAt" timestamptz NOT NULL DEFAULT now()
+  "updatedAt" timestamp(3) without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE public."VoiceEvent" (
@@ -30,7 +30,7 @@ CREATE TABLE public."VoiceEvent" (
   "channelName" text,
   "fromChannelId" text,
   "fromChannelName" text,
-  "createdAt" timestamptz NOT NULL DEFAULT now()
+  "createdAt" timestamp(3) without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE public."MusicHistory" (
@@ -41,7 +41,7 @@ CREATE TABLE public."MusicHistory" (
   "durationSec" integer,
   thumbnail text,
   uploader text,
-  "createdAt" timestamptz NOT NULL DEFAULT now()
+  "createdAt" timestamp(3) without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX "VoiceEvent_guildId_createdAt_idx"

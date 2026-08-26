@@ -3,7 +3,7 @@
 A feature-rich Discord bot built with [discord.js](https://discord.js.org/) v14 +
 TypeScript. It ships with a YouTube music player, text-to-speech (including
 Japanese anime voices via VOICEVOX), voice-channel activity logging backed by
-PostgreSQL, and an optional [Next.js](https://nextjs.org/) web dashboard for
+Supabase, and an optional [Next.js](https://nextjs.org/) web dashboard for
 controlling it from a browser.
 
 Commands and events are auto-loaded from the `src/commands/` and `src/events/`
@@ -21,7 +21,7 @@ folders, so adding a feature is usually just dropping in a new file.
   `/sayjp` speaks in a Japanese anime voice via [VOICEVOX](https://voicevox.hiroshiba.jp/).
   Pluggable TTS providers (OpenAI, Gemini, VOICEVOX, Google Translate TTS).
 - **📋 Voice activity logging** — records who joins/leaves/moves between voice
-  channels to PostgreSQL and (optionally) posts it to a text channel. Browse the
+  channels to Supabase and (optionally) posts it to a text channel. Browse the
   history in the dashboard.
 - **🖥️ Web dashboard** — a Next.js app to view voice activity and drive the bot's
   speak/music features remotely via a local control endpoint.
@@ -56,12 +56,12 @@ discord-bot/
 │   │   ├── music/         # YouTube music player (yt-dlp, queue, effects)
 │   │   ├── voice/         # Voice-channel audio helpers (ducking)
 │   │   ├── voiceAI/       # TTS/STT/LLM providers + sessions
-│   │   └── db.ts          # Prisma client
+│   │   └── supabase.ts     # Server-only Supabase client
 │   ├── deploy-commands.ts # Registers slash commands with Discord
 │   └── index.ts           # Bot entry point
 ├── dashboard/             # Next.js web dashboard (npm workspace)
-├── prisma/                # schema.prisma + migrations (PostgreSQL)
-├── docker-compose.yml     # Local PostgreSQL
+├── supabase/              # SQL schema migrations
+├── scripts/               # Supabase data import/check scripts
 └── .env.example           # Template for your secrets
 ```
 
@@ -97,18 +97,41 @@ committed; `.env.example` is the safe template to commit. The same rule applies
 to `dashboard/.env.local`; `dashboard/.env.example` contains blank placeholders
 and is safe to commit.
 
-### 4. Start PostgreSQL and run migrations
+### 4. Configure Supabase
 
-The voice-logging feature and dashboard need a database. The easiest way is the
-bundled Docker setup:
+Create or open the Supabase project, then run
+`supabase/migrations/20260826223000_initial_schema.sql` in the Supabase SQL
+Editor. Add the following values to `.env`:
 
 ```bash
-docker compose up -d        # starts PostgreSQL (see docker-compose.yml)
-npm run db:generate         # generate the Prisma client
-npm run db:migrate          # apply migrations
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+SUPABASE_SECRET_KEY=sb_secret_...
 ```
 
-`DATABASE_URL` in `.env` must point at this database.
+Put the same public URL/key and server secret in `dashboard/.env.local`. The
+secret key is server-only and must never be committed or exposed to the browser.
+
+To preserve the supplied local data dump, use PostgreSQL 17 tooling and the
+database connection string from Supabase:
+
+```bash
+SUPABASE_DB_URL='postgresql://...' \
+  ./scripts/import-supabase-dump.sh \
+  /Users/kiyang/Downloads/megu-postgres-20260826-222833.dump
+```
+
+The importer copies `GuildConfig`, `BotRuntime`, `VoiceEvent`, and
+`MusicHistory`. It deliberately excludes `Poe2Watch` and Prisma metadata, does
+not alter the dump, and never drops Supabase schemas.
+
+For dashboard Discord login, enable **Discord** under Supabase Dashboard →
+Authentication → Providers. Copy the Supabase provider callback URL shown there
+into the Discord application's OAuth2 redirect list. Add
+`http://localhost:3000/api/auth/callback` (and the production equivalent) to
+Supabase Dashboard → Authentication → URL Configuration → Redirect URLs. The
+dashboard still uses `ADMIN_USER_IDS` and `MEMBER_USER_IDS` to authorize Discord
+identities after Supabase authenticates them.
 
 ### 5. Invite the bot to your server
 
@@ -161,16 +184,16 @@ npm run dev                  # http://localhost:3000
 
 Set `BOT_CONTROL_SECRET` to the **same** random string in both the root `.env`
 and `dashboard/.env.local` so the dashboard can authenticate to the bot's
-control endpoint. For Discord OAuth login, also set `DISCORD_CLIENT_SECRET`,
-`OAUTH_REDIRECT_URI`, and `AUTH_SECRET` in `dashboard/.env.local`, then add the
-redirect URI to the application's OAuth2 settings. Grant access with
-`ADMIN_USER_IDS` and/or `MEMBER_USER_IDS`; `DEV_AUTH_BYPASS=admin` is available
-for local development only and should remain blank in production.
+control endpoint. Grant dashboard access with `ADMIN_USER_IDS` and/or
+`MEMBER_USER_IDS`; `DEV_AUTH_BYPASS=admin` is available for local development
+only and should remain blank in production. Supabase Auth handles the Discord
+OAuth exchange and session cookies; configure its provider and redirect URLs as
+described in the Supabase setup section above.
 
 Local admins can use the **Start bot** and **Stop bot**
 controls on the Voice Activity page; start uses `BOT_START_COMMAND` (default
 `npm run start`) from `BOT_WORKDIR`, and stop requests a graceful shutdown.
-The lifecycle state and last PID are stored in the `BotRuntime` database row.
+The lifecycle state and last PID are stored in the Supabase `BotRuntime` row.
 
 For a production dashboard host, set these in `dashboard/.env.local`:
 
@@ -189,7 +212,7 @@ BOT_START_COMMAND=npm run prod
 | `npm run serve` | Run the already-compiled build (`node dist/index.js`). |
 | `npm run build` / `npm run typecheck` | Compile / type-check only. |
 | `npm run deploy` | Register slash commands with Discord. |
-| `npm run db:generate` / `db:migrate` / `db:studio` | Prisma client / migrations / GUI. |
+| `npm test` | Run the database/auth unit tests. |
 
 ## Notes
 

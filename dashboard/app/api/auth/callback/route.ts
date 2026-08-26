@@ -1,65 +1,31 @@
-// Discord redirects here with ?code & ?state. We verify the state, exchange the
-// code for the user's Discord identity, check the allowlist, and — if allowed —
-// issue a signed session cookie. Otherwise we bounce back to /login with an error.
 import { NextResponse, type NextRequest } from 'next/server';
-import {
-  STATE_COOKIE,
-  SESSION_COOKIE,
-  GUEST_LINK_COOKIE,
-  createSession,
-  exchangeCodeForUser,
-  roleForUser,
-  homePathFor,
-} from '@/lib/auth';
+import { cookies } from 'next/headers';
+import { createClient } from '@/lib/supabase/server';
+import { GUEST_LINK_COOKIE, homePathFor, sessionUserFromSupabaseUser } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 function loginError(req: NextRequest, reason: string) {
   const url = new URL('/login', req.url);
   url.searchParams.set('error', reason);
-  const res = NextResponse.redirect(url);
-  res.cookies.delete(STATE_COOKIE);
-  return res;
+  return NextResponse.redirect(url);
 }
 
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const code = searchParams.get('code');
-  const state = searchParams.get('state');
-  const stateCookie = req.cookies.get(STATE_COOKIE)?.value;
+  const code = req.nextUrl.searchParams.get('code');
+  if (!code) return loginError(req, req.nextUrl.searchParams.get('error') ? 'denied' : 'exchange');
 
-  if (searchParams.get('error')) return loginError(req, 'denied');
-  if (!code || !state || !stateCookie || state !== stateCookie) {
-    return loginError(req, 'state');
+  const supabase = createClient(await cookies());
+  const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+  if (error || !data.user) return loginError(req, 'exchange');
+
+  const user = sessionUserFromSupabaseUser(data.user);
+  if (!user) {
+    await supabase.auth.signOut();
+    return loginError(req, 'forbidden');
   }
 
-  let user;
-  try {
-    user = await exchangeCodeForUser(code);
-  } catch {
-    return loginError(req, 'exchange');
-  }
-
-  const role = roleForUser(user.id);
-  if (!role) return loginError(req, 'forbidden');
-
-  const token = await createSession({
-    id: user.id,
-    username: user.username,
-    avatar: user.avatar,
-    role,
-  });
-
-  const res = NextResponse.redirect(new URL(homePathFor(role), req.url));
-  res.cookies.delete(STATE_COOKIE);
-  // Drop any no-login link-guest lock now that they're a real, switch-capable user.
-  res.cookies.delete(GUEST_LINK_COOKIE);
-  res.cookies.set(SESSION_COOKIE, token, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
-    path: '/',
-    maxAge: 60 * 60 * 24 * 7, // 7 days, matching the JWT TTL
-  });
-  return res;
+  const response = NextResponse.redirect(new URL(homePathFor(user.role), req.url));
+  response.cookies.delete(GUEST_LINK_COOKIE);
+  return response;
 }

@@ -6,7 +6,7 @@ Guidance for Claude Code (and other AI assistants) when working in this reposito
 
 A Discord bot (discord.js v14 + TypeScript, CommonJS) with three feature areas —
 a YouTube **music player**, **text-to-speech** (multi-provider, incl. VOICEVOX
-Japanese voices), and **voice-channel activity logging** to PostgreSQL — plus an
+Japanese voices), and **voice-channel activity logging** to Supabase — plus an
 optional **Next.js web dashboard** that drives the bot over a local HTTP control
 endpoint.
 
@@ -16,12 +16,12 @@ endpoint.
 npm run dev          # bot with auto-restart (tsx watch) — fine for logic work
 npm run prod         # compile to dist/ + run; use for testing music playback
 npm run typecheck    # tsc --noEmit — run this before considering a change done
+npm test             # run database/auth unit tests
 npm run deploy       # re-register slash commands (after changing name/desc/options)
-npm run db:migrate   # apply Prisma migrations (needs PostgreSQL up)
-npm run db:generate  # regenerate the Prisma client after editing schema.prisma
 ```
 
-Run PostgreSQL with `docker compose up -d` before anything that touches the DB.
+Configure `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`,
+and the server-only `SUPABASE_SECRET_KEY` before anything that touches the DB.
 
 ## Architecture
 
@@ -43,12 +43,12 @@ Run PostgreSQL with `docker compose up -d` before anything that touches the DB.
 - **Control endpoint** (`src/control/server.ts`): a `127.0.0.1`-only HTTP server
   guarded by `BOT_CONTROL_SECRET`. Exposes `/speak`, `/preview`, `/leave`,
   `/music`, and `/music/state` so the dashboard can drive the bot.
-- **Database:** Prisma + PostgreSQL. `prisma/schema.prisma` is the single source
-  of truth, **shared by both the bot and the dashboard**. Models: `GuildConfig`
-  (per-server settings), `VoiceEvent` (join/leave/move history).
+- **Database:** Supabase Postgres. `supabase/migrations/` is the source of truth,
+  shared by both the bot and dashboard. Tables: `GuildConfig`, `BotRuntime`,
+  `VoiceEvent`, and `MusicHistory`.
 - **Dashboard** (`dashboard/`): a separate Next.js app and npm workspace. It
-  reads the DB directly via its own Prisma client and calls the bot's control
-  endpoint for live actions.
+  reads Supabase through its SSR client and calls the bot's control endpoint for
+  live actions. Supabase Auth provides Discord OAuth sessions.
 
 ## Conventions
 
@@ -60,8 +60,7 @@ Run PostgreSQL with `docker compose up -d` before anything that touches the DB.
   `.env.example` with an inline comment, following the existing sectioned format.
 - Prefer failing with a clear, actionable message (see the env-var guards in
   `index.ts` and `control/server.ts`) over silent failure.
-- After editing `prisma/schema.prisma`, run `npm run db:generate` (and create a
-  migration with `npm run db:migrate`).
+- Apply SQL changes from `supabase/migrations/` in the Supabase SQL Editor.
 
 ## Gotchas
 

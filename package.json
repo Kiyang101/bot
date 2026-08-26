@@ -12,9 +12,7 @@
     "deploy": "tsx src/deploy-commands.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -29,7 +27,6 @@
     "@discordjs/voice": "^0.19.2",
     "@google/generative-ai": "^0.24.1",
     "@noble/ciphers": "^2.2.0",
-    "@prisma/client": "^6.19.3",
     "@supabase/ssr": "^0.12.5",
     "@supabase/supabase-js": "^2.112.4",
     "discord.js": "^14.26.4",
@@ -45,7 +42,6 @@
   },
   "devDependencies": {
     "@types/node": "^25.9.3",
-    "prisma": "^6.19.3",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }

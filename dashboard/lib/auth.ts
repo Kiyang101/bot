@@ -1,16 +1,10 @@
-// Discord OAuth2 + session handling for the dashboard.
+// Dashboard authorization helpers.
 //
 // Two roles, decided by allowlists in the environment:
 //   • admin  — the bot owner(s); full access to every page.
 //   • member — other people you explicitly allow; Speak + Music pages only.
 // Anyone not in either list is denied even after a successful Discord login.
 //
-// The session is a short, signed JWT stored in an httpOnly cookie. We use `jose`
-// because it works in the Edge middleware runtime (node:crypto does not).
-import { SignJWT, jwtVerify } from 'jose';
-
-export const SESSION_COOKIE = 'megu_session';
-export const STATE_COOKIE = 'megu_oauth_state';
 // Which Discord server the dashboard is pinned to (set by the GuildSwitcher or a
 // ?guild= link). Declared here so the edge middleware can import it without
 // pulling in next/headers via lib/guild.
@@ -19,8 +13,6 @@ export const GUILD_COOKIE = 'guildId';
 // the guild that link is locked to. Distinct from GUILD_COOKIE so a logged-in
 // admin's normal server pin is never confused with a public guest lock.
 export const GUEST_LINK_COOKIE = 'megu_guest_guild';
-const SESSION_TTL = '7d';
-
 export type Role = 'admin' | 'member';
 
 export interface SessionUser {
@@ -108,6 +100,43 @@ export function roleForUser(userId: string): Role | null {
   return null;
 }
 
+/** Alias with an explicit provider-oriented name for Supabase Auth callers. */
+export function resolveRoleForDiscordId(discordId: string): Role | null {
+  return roleForUser(discordId);
+}
+
+export interface SupabaseDiscordIdentity {
+  provider: string;
+  provider_id?: string;
+  identity_data?: Record<string, unknown> | null;
+}
+
+export interface SupabaseAuthUser {
+  id: string;
+  email?: string | null;
+  identities?: SupabaseDiscordIdentity[] | null;
+}
+
+/** Convert a verified Supabase Discord identity into the app's role-aware user. */
+export function sessionUserFromSupabaseUser(user: SupabaseAuthUser | null): SessionUser | null {
+  if (!user) return null;
+  const identity = user.identities?.find((candidate) => candidate.provider === 'discord');
+  if (!identity?.provider_id) return null;
+
+  const role = resolveRoleForDiscordId(identity.provider_id);
+  if (!role) return null;
+
+  const data = identity.identity_data ?? {};
+  const username =
+    (typeof data.username === 'string' && data.username) ||
+    (typeof data.global_name === 'string' && data.global_name) ||
+    user.email ||
+    'Discord user';
+  const avatar = typeof data.avatar === 'string' ? data.avatar : null;
+
+  return { id: identity.provider_id, username, avatar, role };
+}
+
 /**
  * Local-dev escape hatch: when DEV_AUTH_BYPASS is set to "admin" or "member"
  * AND we're not in production, treat every request as a signed-in user of that
@@ -176,109 +205,4 @@ export function linkGuestUser(guildFromCookie: string | undefined | null): Sessi
 export function linkGuestGuildId(guildFromCookie: string | undefined | null): string | null {
   if (!publicLinkEnabled() || !guildFromCookie) return null;
   return guildFromCookie;
-}
-
-function secretKey(): Uint8Array {
-  const secret = process.env.AUTH_SECRET;
-  if (!secret) throw new Error('AUTH_SECRET is not set');
-  return new TextEncoder().encode(secret);
-}
-
-/** Sign a session JWT for the given user. */
-export async function createSession(user: SessionUser): Promise<string> {
-  return new SignJWT({ ...user })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuedAt()
-    .setExpirationTime(SESSION_TTL)
-    .sign(secretKey());
-}
-
-/** Verify a session JWT; returns the user or null if missing/invalid/expired. */
-export async function verifySession(token: string | undefined): Promise<SessionUser | null> {
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify(token, secretKey());
-    const { id, username, avatar, role } = payload as Record<string, unknown>;
-    if (typeof id !== 'string' || (role !== 'admin' && role !== 'member')) return null;
-    return {
-      id,
-      username: typeof username === 'string' ? username : 'unknown',
-      avatar: typeof avatar === 'string' ? avatar : null,
-      role,
-    };
-  } catch {
-    return null;
-  }
-}
-
-// ─── Discord OAuth2 endpoints / helpers ──────────────────────────────────────
-
-const DISCORD_AUTH = 'https://discord.com/api/oauth2/authorize';
-const DISCORD_TOKEN = 'https://discord.com/api/oauth2/token';
-const DISCORD_USER = 'https://discord.com/api/users/@me';
-
-function redirectUri(): string {
-  return process.env.OAUTH_REDIRECT_URI ?? 'http://localhost:3000/api/auth/callback';
-}
-
-/** Build the Discord consent URL to send the user to, embedding an anti-CSRF state. */
-export function buildAuthorizeUrl(state: string): string {
-  const clientId = process.env.CLIENT_ID;
-  if (!clientId) throw new Error('CLIENT_ID is not set');
-  const params = new URLSearchParams({
-    client_id: clientId,
-    redirect_uri: redirectUri(),
-    response_type: 'code',
-    scope: 'identify',
-    state,
-    prompt: 'consent',
-  });
-  return `${DISCORD_AUTH}?${params.toString()}`;
-}
-
-/** Exchange an OAuth `code` for an access token. */
-async function exchangeCode(code: string): Promise<string> {
-  const clientId = process.env.CLIENT_ID;
-  const clientSecret = process.env.DISCORD_CLIENT_SECRET;
-  if (!clientId || !clientSecret) throw new Error('CLIENT_ID / DISCORD_CLIENT_SECRET not set');
-
-  const res = await fetch(DISCORD_TOKEN, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: redirectUri(),
-    }),
-    cache: 'no-store',
-  });
-  if (!res.ok) throw new Error(`token exchange failed (${res.status}): ${await res.text()}`);
-  const data = (await res.json()) as { access_token?: string };
-  if (!data.access_token) throw new Error('no access_token in token response');
-  return data.access_token;
-}
-
-export interface DiscordUser {
-  id: string;
-  username: string;
-  avatar: string | null;
-}
-
-/** Fetch the logged-in Discord user with an access token. */
-async function fetchDiscordUser(accessToken: string): Promise<DiscordUser> {
-  const res = await fetch(DISCORD_USER, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    cache: 'no-store',
-  });
-  if (!res.ok) throw new Error(`fetch user failed (${res.status})`);
-  const u = (await res.json()) as { id: string; username: string; avatar: string | null };
-  return { id: u.id, username: u.username, avatar: u.avatar };
-}
-
-/** Full code → token → user round-trip, used by the callback route. */
-export async function exchangeCodeForUser(code: string): Promise<DiscordUser> {
-  const token = await exchangeCode(code);
-  return fetchDiscordUser(token);
 }

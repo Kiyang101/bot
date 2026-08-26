@@ -1,4 +1,6 @@
-import { prisma } from '@/lib/prisma';
+import { cookies } from 'next/headers';
+import { createClient } from '@/lib/supabase/server';
+import { assertSupabaseResult } from '@/lib/database';
 import { getGuildInfo } from '@/lib/discord';
 import { getSelectedGuildId } from '@/lib/guild';
 import { readBotRuntime } from '@/lib/runtime';
@@ -17,14 +19,20 @@ function timeAgo(date: Date): string {
 
 export default async function LogsPage() {
   const guildId = await getSelectedGuildId();
-  const where = guildId ? { guildId } : undefined;
 
-  const [events, total, guild, runtime] = await Promise.all([
-    prisma.voiceEvent.findMany({ where, orderBy: { createdAt: 'desc' }, take: 100 }),
-    prisma.voiceEvent.count({ where }),
+  const db = createClient(await cookies());
+  let eventsQuery = db.from('VoiceEvent').select('*', { count: 'exact' }).order('createdAt', { ascending: false }).limit(100);
+  if (guildId) eventsQuery = eventsQuery.eq('guildId', guildId);
+  const [eventsResult, guild, runtime] = await Promise.all([
+    eventsQuery,
     getGuildInfo(guildId).catch(() => null),
     readBotRuntime().catch(() => null),
   ]);
+  const events = (assertSupabaseResult('read VoiceEvent', eventsResult) ?? []).map((event) => ({
+    ...event,
+    createdAt: new Date(event.createdAt),
+  }));
+  const total = eventsResult.count ?? 0;
 
   return (
     <main>

@@ -5,7 +5,7 @@ param(
     [string]$Command = 'help',
 
     [Parameter(Position = 1)]
-    [ValidateSet('bot', 'dashboard', 'db')]
+    [ValidateSet('bot', 'dashboard')]
     [string]$Service
 )
 
@@ -15,10 +15,6 @@ $ProjectRoot = $PSScriptRoot
 $LogsDir     = Join-Path $ProjectRoot 'logs'
 $StateDir    = Join-Path $ProjectRoot '.megu'
 $StateFile   = Join-Path $StateDir 'state.json'
-
-$PgCtl  = 'D:\PostgreSQL\pgsql\bin\pg_ctl'
-$PgData = 'D:\PostgreSQL\data'
-$PgLog  = 'D:\PostgreSQL\logfile.txt'
 
 if (-not (Test-Path $LogsDir))  { New-Item -ItemType Directory -Path $LogsDir  | Out-Null }
 if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir | Out-Null }
@@ -40,35 +36,12 @@ function Test-ProcessAlive($processId) {
     catch { return $false }
 }
 
-function Test-PostgresRunning {
-    # Check whether anything is in LISTEN state on port 5432. Works regardless
-    # of whether the listener is bound to IPv4, IPv6, localhost or 0.0.0.0,
-    # and regardless of which shell started Postgres.
-    try {
-        $conn = Get-NetTCPConnection -LocalPort 5432 -State Listen -ErrorAction Stop
-        return $null -ne $conn
-    } catch {
-        return $false
-    }
-}
-
 function Stop-ProcessTree($processId) {
     if (-not $processId) { return }
     Get-CimInstance Win32_Process |
         Where-Object { $_.ParentProcessId -eq $processId } |
         ForEach-Object { Stop-ProcessTree $_.ProcessId }
     Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-}
-
-function Start-Postgres {
-    if (Test-PostgresRunning) {
-        Write-Host "  [db]        already running" -ForegroundColor Yellow
-        return
-    }
-    Write-Host "  [db]        starting..." -ForegroundColor Cyan
-    & $PgCtl -D $PgData -l $PgLog -w start | Out-Null
-    if (Test-PostgresRunning) { Write-Host "  [db]        started" -ForegroundColor Green }
-    else                      { Write-Host "  [db]        FAILED" -ForegroundColor Red }
 }
 
 function Start-NodeService($name, $field, $arguments) {
@@ -106,32 +79,20 @@ function Stop-NodeService($name, $field) {
     Set-State $state
 }
 
-function Stop-Postgres {
-    if (-not (Test-PostgresRunning)) {
-        Write-Host "  [db]        not running" -ForegroundColor Yellow
-        return
-    }
-    Write-Host "  [db]        stopping..." -ForegroundColor Cyan
-    & $PgCtl -D $PgData stop | Out-Null
-    Write-Host "  [db]        stopped" -ForegroundColor Green
-}
-
 function Invoke-Start {
     Write-Host "Starting Megu stack..." -ForegroundColor Magenta
-    Start-Postgres
     Start-NodeService 'bot'       'bot'       @('start')
     Start-NodeService 'dashboard' 'dashboard' @('run', 'dev', '--workspace', 'dashboard')
     Write-Host ""
     Write-Host "Done." -ForegroundColor Magenta
     Write-Host "  Dashboard: http://localhost:3000"
-    Write-Host "  Logs:      .\megu.ps1 logs bot|dashboard|db"
+    Write-Host "  Logs:      .\megu.ps1 logs bot|dashboard"
 }
 
 function Invoke-Stop {
     Write-Host "Stopping Megu stack..." -ForegroundColor Magenta
     Stop-NodeService 'bot'       'bot'
     Stop-NodeService 'dashboard' 'dashboard'
-    Stop-Postgres
     Write-Host ""
     Write-Host "Done." -ForegroundColor Magenta
 }
@@ -146,9 +107,6 @@ function Invoke-Status {
     $state = Get-State
     Write-Host "Megu stack status:" -ForegroundColor Magenta
 
-    if (Test-PostgresRunning)              { Write-Host "  [db]        RUNNING" -ForegroundColor Green }
-    else                                   { Write-Host "  [db]        stopped" -ForegroundColor Red }
-
     if (Test-ProcessAlive $state.bot)       { Write-Host "  [bot]       RUNNING (PID $($state.bot))" -ForegroundColor Green }
     else                                    { Write-Host "  [bot]       stopped" -ForegroundColor Red }
 
@@ -158,13 +116,12 @@ function Invoke-Status {
 
 function Invoke-Logs {
     if (-not $Service) {
-        Write-Host "Usage: .\megu.ps1 logs <bot|dashboard|db>" -ForegroundColor Red
+        Write-Host "Usage: .\megu.ps1 logs <bot|dashboard>" -ForegroundColor Red
         return
     }
     $logPath = switch ($Service) {
         'bot'       { Join-Path $LogsDir 'bot.log' }
         'dashboard' { Join-Path $LogsDir 'dashboard.log' }
-        'db'        { $PgLog }
     }
     if (-not (Test-Path $logPath)) {
         Write-Host "Log not found: $logPath" -ForegroundColor Red
@@ -178,16 +135,16 @@ function Invoke-Logs {
 function Invoke-Help {
     Write-Host @"
 
-Megu launcher — manages PostgreSQL, the Discord bot, and the dashboard.
+Megu launcher — manages the Discord bot and dashboard.
 
 Usage: .\megu.ps1 <command> [service]
 
 Commands:
-  start                Start db, bot, and dashboard (skips ones already running).
-  stop                 Stop bot, dashboard, and db.
+  start                Start bot and dashboard (skips ones already running).
+  stop                 Stop bot and dashboard.
   restart              Stop then start.
   status               Show whether each service is running.
-  logs <service>       Tail the log of bot | dashboard | db.  Ctrl+C exits.
+  logs <service>       Tail the log of bot | dashboard.  Ctrl+C exits.
   help                 Show this message.
 
 Examples:
@@ -200,8 +157,6 @@ Notes:
   * Bot and dashboard run hidden in the background. Their stdout/stderr go to
     .\logs\bot.log and .\logs\dashboard.log — use 'megu logs <service>' to tail.
   * PIDs are tracked in .megu\state.json so stop/restart hit the right process.
-  * Postgres log: $PgLog
-
 "@
 }
 
