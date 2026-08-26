@@ -1,5 +1,5 @@
 import { Events, EmbedBuilder, type VoiceState } from 'discord.js';
-import { VoiceAction } from '@prisma/client';
+import { VoiceAction } from '../lib/database';
 import type { BotEvent } from '../types';
 import * as store from '../lib/voiceLogStore';
 

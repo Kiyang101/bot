@@ -1,5 +1,7 @@
 import { listTextChannels } from '@/lib/discord';
-import { prisma } from '@/lib/prisma';
+import { cookies } from 'next/headers';
+import { createClient } from '@/lib/supabase/server';
+import { assertSupabaseResult } from '@/lib/database';
 import { getSelectedGuildId } from '@/lib/guild';
 import { saveLogChannel } from '../actions';
 
@@ -8,11 +10,14 @@ export const dynamic = 'force-dynamic';
 export default async function ConfigPage() {
   const guildId = await getSelectedGuildId();
 
-  const [channels, config] = await Promise.all([
+  const [channels, configResult] = await Promise.all([
     listTextChannels(guildId).catch(() => []),
-    guildId ? prisma.guildConfig.findUnique({ where: { guildId } }) : Promise.resolve(null),
+    guildId
+      ? createClient(await cookies()).from('GuildConfig').select('*').eq('guildId', guildId).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
   ]);
 
+  const config = assertSupabaseResult('read GuildConfig', configResult);
   const current = config?.logChannelId ?? '';
 
   return (

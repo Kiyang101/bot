@@ -1,17 +1,31 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { prisma } from '@/lib/prisma';
+import { createAdminClient } from '@/lib/supabase/admin';
+import { assertSupabaseResult } from '@/lib/database';
+
+const database = () => createAdminClient();
 
 const ROOT_DIR = process.env.BOT_WORKDIR ?? process.env.BOT_ROOT_DIR ?? path.resolve(process.cwd(), '..');
 const START_COMMAND = process.env.BOT_START_COMMAND ?? 'npm run start';
 
+async function updateRuntime(
+  operation: string,
+  values: Record<string, unknown>,
+  filters: (query: any) => any,
+): Promise<void> {
+  const query = filters(database().from('BotRuntime').update({ ...values, updatedAt: new Date().toISOString() }));
+  assertSupabaseResult(operation, await query);
+}
+
 /** Launch the bot as a detached process owned by the dashboard host. */
 export async function startManagedBot(): Promise<number> {
-  await prisma.botRuntime.upsert({
-    where: { id: 1 },
-    create: { id: 1, status: 'STARTING', lastError: null },
-    update: { status: 'STARTING', pid: null, startedAt: new Date(), stoppedAt: null, lastError: null },
-  });
+  assertSupabaseResult(
+    'start bot runtime',
+    await database().from('BotRuntime').upsert(
+      { id: 1, status: 'STARTING', pid: null, startedAt: new Date().toISOString(), stoppedAt: null, lastError: null, updatedAt: new Date().toISOString() },
+      { onConflict: 'id' },
+    ),
+  );
 
   try {
     const child = spawn(START_COMMAND, {
@@ -27,32 +41,38 @@ export async function startManagedBot(): Promise<number> {
     child.unref();
 
     child.once('error', (error) => {
-      void prisma.botRuntime.updateMany({
-        where: { id: 1, status: 'STARTING' },
-        data: { status: 'ERROR', pid: null, lastError: error.message },
-      });
+      void updateRuntime('record bot process error', { status: 'ERROR', pid: null, lastError: error.message }, (query) =>
+        query.eq('id', 1).eq('status', 'STARTING'),
+      ).catch((updateError) => console.error('[bot-process] failed to store process error:', updateError));
     });
     child.once('exit', (code, signal) => {
       if (code === 0 && !signal) return;
-      void prisma.botRuntime.updateMany({
-        where: { id: 1, status: { in: ['STARTING', 'RUNNING'] } },
-        data: {
+      void updateRuntime(
+        'record bot process exit',
+        {
           status: 'ERROR',
           pid: null,
           lastError: signal
             ? `Bot process exited on ${signal}.`
             : `Bot process exited unexpectedly (code ${code}).`,
         },
-      });
+        (query) => query.eq('id', 1).in('status', ['STARTING', 'RUNNING']),
+      ).catch((updateError) => console.error('[bot-process] failed to store process exit:', updateError));
     });
 
-    await prisma.botRuntime.updateMany({ where: { id: 1 }, data: { pid } });
+    assertSupabaseResult(
+      'store bot pid',
+      await database().from('BotRuntime').update({ pid, updatedAt: new Date().toISOString() }).eq('id', 1),
+    );
     return pid;
   } catch (error) {
-    await prisma.botRuntime.updateMany({
-      where: { id: 1 },
-      data: { status: 'ERROR', pid: null, lastError: error instanceof Error ? error.message : String(error) },
-    });
+    assertSupabaseResult(
+      'mark bot start error',
+      await database()
+        .from('BotRuntime')
+        .update({ status: 'ERROR', pid: null, lastError: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() })
+        .eq('id', 1),
+    );
     throw error;
   }
 }

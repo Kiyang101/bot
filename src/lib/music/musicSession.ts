@@ -28,7 +28,8 @@ import { EFFECTS, DEFAULT_INTENSITY } from './types';
 import { createAudioStream, getStreamUrl, effectPlaybackRate, type AudioStream } from './ytdlp';
 import { nowPlayingEmbed, controlComponents } from './ui';
 import { registerDuckable, unregisterDuckable } from '../voice/ducking';
-import { prisma } from '../db';
+import { assertSupabaseResult } from '../database';
+import { getSupabaseAdmin } from '../supabase';
 
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -47,17 +48,24 @@ const MAX_QUEUE = envInt('MUSIC_MAX_QUEUE', 100);
 /** Save only tracks that successfully started playing. */
 async function recordMusicHistory(guildId: string, track: Track): Promise<void> {
   try {
-    const previous = await prisma.musicHistory.findFirst({
-      where: { guildId },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      select: { url: true },
-    });
+    const previous = assertSupabaseResult(
+      'read MusicHistory',
+      await getSupabaseAdmin()
+        .from('MusicHistory')
+        .select('url')
+        .eq('guildId', guildId)
+        .order('createdAt', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    );
     // Only suppress an immediate repeat; the same track may be stored again
     // after another track has become the latest history item.
     if (previous?.url === track.url) return;
 
-    await prisma.musicHistory.create({
-      data: {
+    assertSupabaseResult(
+      'write MusicHistory',
+      await getSupabaseAdmin().from('MusicHistory').insert({
         guildId,
         title: track.title,
         url: track.url,
@@ -65,8 +73,8 @@ async function recordMusicHistory(guildId: string, track: Track): Promise<void> 
           track.durationSec == null ? null : Math.max(0, Math.round(track.durationSec)),
         thumbnail: track.thumbnail,
         uploader: track.uploader,
-      },
-    });
+      }),
+    );
   } catch (err) {
     // A database failure must never interrupt audio playback.
     console.error(`[music] failed to save history for guild ${guildId}:`, (err as Error).message);

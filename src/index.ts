@@ -5,7 +5,6 @@ import { config } from 'dotenv';
 import type { Command, BotEvent } from './types';
 import { startControlServer } from './control/server';
 import { markBotError, markBotRunning, markBotStarting, markBotStopped, markBotStopping } from './lib/botRuntime';
-import { prisma } from './lib/db';
 
 config(); // load .env
 
@@ -28,7 +27,6 @@ async function shutdown(reason: string): Promise<void> {
   await markBotStopping().catch((err) => console.error('[lifecycle] could not mark stopping:', err));
   client.destroy();
   await markBotStopped().catch((err) => console.error('[lifecycle] could not mark stopped:', err));
-  await prisma.$disconnect().catch(() => undefined);
   process.exit(0);
 }
 
@@ -96,6 +94,5 @@ client.once(Events.ClientReady, async () => {
 client.login(token).catch(async (err) => {
   console.error('[login] failed:', err);
   await markBotError(err).catch(() => undefined);
-  await prisma.$disconnect().catch(() => undefined);
   process.exitCode = 1;
 });

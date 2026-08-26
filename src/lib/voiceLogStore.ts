@@ -1,30 +1,43 @@
-import { prisma } from './db';
-import type { VoiceAction } from '@prisma/client';
+import { getSupabaseAdmin } from './supabase';
+import { assertSupabaseResult, VoiceAction, type VoiceAction as VoiceActionType } from './database';
+
+const now = () => new Date().toISOString();
 
 // --- Per-server log channel config (table: GuildConfig) ---
 
 /** Returns the configured log channel ID for a server, or null if none. */
 export async function getLogChannel(guildId: string): Promise<string | null> {
-  const config = await prisma.guildConfig.findUnique({ where: { guildId } });
+  const config = assertSupabaseResult(
+    'read GuildConfig',
+    await getSupabaseAdmin()
+      .from('GuildConfig')
+      .select('logChannelId')
+      .eq('guildId', guildId)
+      .maybeSingle(),
+  );
   return config?.logChannelId ?? null;
 }
 
 /** Sets (creates or updates) the log channel for a server. */
 export async function setLogChannel(guildId: string, channelId: string): Promise<void> {
-  await prisma.guildConfig.upsert({
-    where: { guildId },
-    create: { guildId, logChannelId: channelId },
-    update: { logChannelId: channelId },
-  });
+  assertSupabaseResult(
+    'write GuildConfig',
+    await getSupabaseAdmin().from('GuildConfig').upsert(
+      { guildId, logChannelId: channelId, updatedAt: now() },
+      { onConflict: 'guildId' },
+    ),
+  );
 }
 
 /** Disables logging for a server by clearing its channel. */
 export async function clearLogChannel(guildId: string): Promise<void> {
-  await prisma.guildConfig.upsert({
-    where: { guildId },
-    create: { guildId, logChannelId: null },
-    update: { logChannelId: null },
-  });
+  assertSupabaseResult(
+    'clear GuildConfig',
+    await getSupabaseAdmin().from('GuildConfig').upsert(
+      { guildId, logChannelId: null, updatedAt: now() },
+      { onConflict: 'guildId' },
+    ),
+  );
 }
 
 // --- Voice event history (table: VoiceEvent) ---
@@ -33,7 +46,7 @@ export interface VoiceEventInput {
   guildId: string;
   userId: string;
   username: string;
-  action: VoiceAction;
+  action: VoiceActionType;
   channelId?: string | null;
   channelName?: string | null;
   fromChannelId?: string | null;
@@ -42,5 +55,7 @@ export interface VoiceEventInput {
 
 /** Records one voice action so the dashboard can show a history. */
 export async function recordVoiceEvent(event: VoiceEventInput): Promise<void> {
-  await prisma.voiceEvent.create({ data: event });
+  assertSupabaseResult('write VoiceEvent', await getSupabaseAdmin().from('VoiceEvent').insert(event));
 }
+
+export { VoiceAction };

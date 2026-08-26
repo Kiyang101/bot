@@ -1,7 +1,9 @@
 'use server';
 
 import { cookies } from 'next/headers';
-import { prisma } from '@/lib/prisma';
+import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
+import { assertSupabaseResult } from '@/lib/database';
 import { revalidatePath } from 'next/cache';
 import {
   sendSpeak,
@@ -49,7 +51,10 @@ export async function startBot(): Promise<BotActionState> {
       if (runtime.pid && processIsAlive(runtime.pid)) {
         return { ok: true, message: 'Bot process is already running; waiting for it to become ready.' };
       }
-      await prisma.botRuntime.updateMany({ where: { id: 1 }, data: { status: 'STOPPED', pid: null } });
+      assertSupabaseResult(
+        'reset BotRuntime',
+        await createAdminClient().from('BotRuntime').update({ status: 'STOPPED', pid: null, updatedAt: new Date().toISOString() }).eq('id', 1),
+      );
     }
   }
   try {
@@ -70,17 +75,29 @@ export async function stopBot(): Promise<BotActionState> {
 
   try {
     await sendBotStop();
-    await prisma.botRuntime.updateMany({ where: { id: 1 }, data: { status: 'STOPPING' } });
+    assertSupabaseResult(
+      'mark BotRuntime stopping',
+      await createAdminClient().from('BotRuntime').update({ status: 'STOPPING', updatedAt: new Date().toISOString() }).eq('id', 1),
+    );
     return { ok: true, message: 'Bot is stopping gracefully.' };
   } catch (controlError) {
     if (!runtime.pid || !processIsAlive(runtime.pid)) {
-      await prisma.botRuntime.updateMany({ where: { id: 1 }, data: { status: 'STOPPED', pid: null, stoppedAt: new Date() } });
+      assertSupabaseResult(
+        'mark BotRuntime stopped',
+        await createAdminClient().from('BotRuntime').update({ status: 'STOPPED', pid: null, stoppedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).eq('id', 1),
+      );
       return { ok: true, message: 'Bot process was already stopped.' };
     }
     try {
-      await prisma.botRuntime.updateMany({ where: { id: 1 }, data: { status: 'STOPPING' } });
+      assertSupabaseResult(
+        'mark BotRuntime stopping',
+        await createAdminClient().from('BotRuntime').update({ status: 'STOPPING', updatedAt: new Date().toISOString() }).eq('id', 1),
+      );
       await forceStopProcess(runtime.pid);
-      await prisma.botRuntime.updateMany({ where: { id: 1 }, data: { status: 'STOPPED', pid: null, stoppedAt: new Date() } });
+      assertSupabaseResult(
+        'mark BotRuntime stopped',
+        await createAdminClient().from('BotRuntime').update({ status: 'STOPPED', pid: null, stoppedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).eq('id', 1),
+      );
       return { ok: true, message: 'Bot was stopped.' };
     } catch (err) {
       return {
@@ -100,11 +117,13 @@ export async function saveLogChannel(formData: FormData) {
   const raw = formData.get('channelId')?.toString() ?? '';
   const channelId = raw === '' ? null : raw;
 
-  await prisma.guildConfig.upsert({
-    where: { guildId },
-    create: { guildId, logChannelId: channelId },
-    update: { logChannelId: channelId },
-  });
+  assertSupabaseResult(
+    'write GuildConfig',
+    await createAdminClient().from('GuildConfig').upsert(
+      { guildId, logChannelId: channelId, updatedAt: new Date().toISOString() },
+      { onConflict: 'guildId' },
+    ),
+  );
 
   revalidatePath('/config');
   revalidatePath('/');
@@ -236,12 +255,16 @@ export async function fetchMusicHistory(): Promise<MusicHistoryItem[]> {
   const guildId = await getSelectedGuildId();
   if (!guildId) return [];
 
-  const rows = await prisma.musicHistory.findMany({
-    where: { guildId },
-    orderBy: { createdAt: 'desc' },
-    take: 50,
-  });
-  return rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() }));
+  const rows = assertSupabaseResult(
+    'read MusicHistory',
+    await createClient(await cookies())
+      .from('MusicHistory')
+      .select('*')
+      .eq('guildId', guildId)
+      .order('createdAt', { ascending: false })
+      .limit(50),
+  ) ?? [];
+  return rows.map((row) => ({ ...row, createdAt: row.createdAt }));
 }
 
 /** Poll the live music state for the selected server. */

@@ -1,5 +1,7 @@
 import { listVoiceChannels } from '@/lib/discord';
-import { prisma } from '@/lib/prisma';
+import { cookies } from 'next/headers';
+import { createClient } from '@/lib/supabase/server';
+import { assertSupabaseResult } from '@/lib/database';
 import { getSelectedGuildId } from '@/lib/guild';
 import { getMusicState, type MusicState } from '@/lib/control';
 import type { MusicHistoryItem } from '../actions';
@@ -27,11 +29,15 @@ export default async function MusicPage() {
     guildId ? getMusicState(guildId).catch(() => EMPTY) : Promise.resolve(EMPTY),
   ]);
   const historyRows = guildId
-    ? await prisma.musicHistory.findMany({
-        where: { guildId },
-        orderBy: { createdAt: 'desc' },
-        take: 50,
-      })
+    ? (assertSupabaseResult(
+        'read MusicHistory',
+        await createClient(await cookies())
+          .from('MusicHistory')
+          .select('*')
+          .eq('guildId', guildId)
+          .order('createdAt', { ascending: false })
+          .limit(50),
+      ) ?? [])
     : [];
   const initialHistory: MusicHistoryItem[] = historyRows.map((row) => ({
     id: row.id,
@@ -40,7 +46,7 @@ export default async function MusicPage() {
     durationSec: row.durationSec,
     thumbnail: row.thumbnail,
     uploader: row.uploader,
-    createdAt: row.createdAt.toISOString(),
+    createdAt: row.createdAt,
   }));
 
   return (
