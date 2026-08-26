@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   playMusic,
   controlMusic,
+  clearMusicHistory,
   fetchMusicState,
   fetchMusicHistory,
   type MusicActionState,
@@ -52,10 +53,12 @@ export default function MusicPlayer({
   channels,
   initialState,
   initialHistory,
+  isAdmin,
 }: {
   channels: Channel[];
   initialState: MusicState;
   initialHistory: MusicHistoryItem[];
+  isAdmin: boolean;
 }) {
   const [channelId, setChannelId] = useState(channels[0]?.id ?? '');
   const [query, setQuery] = useState('');
@@ -144,6 +147,22 @@ export default function MusicPlayer({
     } catch {
       // A history refresh should not make an already-successful play request
       // look like it failed.
+    }
+  }
+
+  async function handleClearHistory() {
+    if (!window.confirm('Clear all music history for this server? This cannot be undone.')) return;
+
+    setPending(true);
+    setResult(null);
+    try {
+      const res = await clearMusicHistory();
+      setResult(res);
+      if (res.ok) setHistory([]);
+    } catch {
+      setResult({ ok: false, message: '❌ Something went wrong clearing music history.' });
+    } finally {
+      setPending(false);
     }
   }
 
@@ -459,7 +478,19 @@ export default function MusicPlayer({
             <div className="section-title">Replay</div>
             <h2>Music history</h2>
           </div>
-          <span className="muted">{history.length}</span>
+          <div className="music-history-actions">
+            <span className="muted">{history.length}</span>
+            {isAdmin && (
+              <button
+                type="button"
+                className="danger history-clear"
+                disabled={pending || history.length === 0}
+                onClick={() => void handleClearHistory()}
+              >
+                Clear
+              </button>
+            )}
+          </div>
         </div>
         {history.length === 0 ? (
           <p className="history-empty">Songs you play from the dashboard will appear here.</p>

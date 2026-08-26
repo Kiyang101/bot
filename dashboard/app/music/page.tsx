@@ -1,8 +1,10 @@
 import { listVoiceChannels } from "@/lib/discord";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSupabaseResult } from "@/lib/database";
 import { getSelectedGuildId } from "@/lib/guild";
+import { getSessionUser } from "@/lib/session";
 import { getMusicState, type MusicState } from "@/lib/control";
 import type { MusicHistoryItem } from "../actions";
 import MusicPlayer from "./MusicPlayer";
@@ -30,10 +32,12 @@ export default async function MusicPage() {
       ? getMusicState(guildId).catch(() => EMPTY)
       : Promise.resolve(EMPTY),
   ]);
+  const user = await getSessionUser();
+  const db = user?.id === "guest" ? createAdminClient() : createClient(await cookies());
   const historyRows = guildId
     ? (assertSupabaseResult(
         "read MusicHistory",
-        await createClient(await cookies())
+        await db
           .from("MusicHistory")
           .select("*")
           .eq("guildId", guildId)
@@ -63,6 +67,7 @@ export default async function MusicPage() {
         channels={channels}
         initialState={initialState}
         initialHistory={initialHistory}
+        isAdmin={user?.role === "admin"}
       />
 
       <p className="hint">

@@ -17,7 +17,7 @@ import {
   type Effect,
 } from '@/lib/control';
 import { getSelectedGuildId, lockedGuildId, GUILD_COOKIE } from '@/lib/guild';
-import { requireRole } from '@/lib/session';
+import { getSessionUser, requireRole } from '@/lib/session';
 import { readBotRuntime } from '@/lib/runtime';
 import { forceStopProcess, processIsAlive, startManagedBot } from '@/lib/botProcess';
 import { getBotStatus, sendBotStop } from '@/lib/control';
@@ -255,9 +255,15 @@ export async function fetchMusicHistory(): Promise<MusicHistoryItem[]> {
   const guildId = await getSelectedGuildId();
   if (!guildId) return [];
 
+  // Public dashboard links use a guest session rather than Supabase Auth.
+  // MusicHistory is intentionally readable only by authenticated users via
+  // RLS, so use the trusted server client for this already guild-scoped read.
+  const user = await getSessionUser();
+  const db = user?.id === 'guest' ? createAdminClient() : createClient(await cookies());
+
   const rows = assertSupabaseResult(
     'read MusicHistory',
-    await createClient(await cookies())
+    await db
       .from('MusicHistory')
       .select('*')
       .eq('guildId', guildId)
@@ -265,6 +271,24 @@ export async function fetchMusicHistory(): Promise<MusicHistoryItem[]> {
       .limit(50),
   ) ?? [];
   return rows.map((row) => ({ ...row, createdAt: row.createdAt }));
+}
+
+/** Delete all music history for the selected server. Admin-only by design. */
+export async function clearMusicHistory(): Promise<MusicActionState> {
+  await requireRole('admin');
+  const guildId = await getSelectedGuildId();
+  if (!guildId) return { ok: false, message: 'No server selected.' };
+
+  try {
+    assertSupabaseResult(
+      'clear MusicHistory',
+      await createAdminClient().from('MusicHistory').delete().eq('guildId', guildId),
+    );
+    revalidatePath('/music');
+    return { ok: true, message: 'Music history cleared.' };
+  } catch (err) {
+    return { ok: false, message: `❌ ${err instanceof Error ? err.message : 'Failed to clear music history.'}` };
+  }
 }
 
 /** Poll the live music state for the selected server. */
