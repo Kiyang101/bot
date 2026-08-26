@@ -20,7 +20,7 @@ if ! command -v pg_restore >/dev/null 2>&1 || ! command -v psql >/dev/null 2>&1;
 fi
 
 restore_version="$(pg_restore --version)"
-restore_major="$(sed -E 's/.*PostgreSQL ([0-9]+)\..*/\1/' <<<"$restore_version")"
+restore_major="$(sed -nE 's/.*PostgreSQL[^0-9]*([0-9]+)\..*/\1/p' <<<"$restore_version")"
 if [[ ! "$restore_major" =~ ^[0-9]+$ || "$restore_major" -lt 17 ]]; then
   echo "PostgreSQL 17 or newer pg_restore is required; found: $restore_version" >&2
   exit 2
