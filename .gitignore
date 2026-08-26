@@ -20,3 +20,6 @@ npm-debug.log*
 # Runtime data (per-server settings)
 data/
 .megu/
+
+# Local git worktrees
+.worktrees/
