@@ -1,21 +1,21 @@
-import { listVoiceChannels } from '@/lib/discord';
-import { cookies } from 'next/headers';
-import { createClient } from '@/lib/supabase/server';
-import { assertSupabaseResult } from '@/lib/database';
-import { getSelectedGuildId } from '@/lib/guild';
-import { getMusicState, type MusicState } from '@/lib/control';
-import type { MusicHistoryItem } from '../actions';
-import MusicPlayer from './MusicPlayer';
+import { listVoiceChannels } from "@/lib/discord";
+import { cookies } from "next/headers";
+import { createClient } from "@/lib/supabase/server";
+import { assertSupabaseResult } from "@/lib/database";
+import { getSelectedGuildId } from "@/lib/guild";
+import { getMusicState, type MusicState } from "@/lib/control";
+import type { MusicHistoryItem } from "../actions";
+import MusicPlayer from "./MusicPlayer";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 const EMPTY: MusicState = {
   current: null,
   queue: [],
-  loop: 'off',
-  effect: 'off',
+  loop: "off",
+  effect: "off",
   intensity: 50,
-  volume: 50,
+  volume: 80,
   positionSec: 0,
   playbackRate: 1,
   paused: false,
@@ -26,16 +26,18 @@ export default async function MusicPage() {
   const guildId = await getSelectedGuildId();
   const [channels, initialState] = await Promise.all([
     listVoiceChannels(guildId).catch(() => []),
-    guildId ? getMusicState(guildId).catch(() => EMPTY) : Promise.resolve(EMPTY),
+    guildId
+      ? getMusicState(guildId).catch(() => EMPTY)
+      : Promise.resolve(EMPTY),
   ]);
   const historyRows = guildId
     ? (assertSupabaseResult(
-        'read MusicHistory',
+        "read MusicHistory",
         await createClient(await cookies())
-          .from('MusicHistory')
-          .select('*')
-          .eq('guildId', guildId)
-          .order('createdAt', { ascending: false })
+          .from("MusicHistory")
+          .select("*")
+          .eq("guildId", guildId)
+          .order("createdAt", { ascending: false })
           .limit(50),
       ) ?? [])
     : [];
@@ -52,14 +54,21 @@ export default async function MusicPage() {
   return (
     <main className="music-page">
       <h1>Music</h1>
-      <p className="sub">Play YouTube audio or Spotify links in a voice channel and control the queue live.</p>
+      <p className="sub">
+        Play YouTube audio or Spotify links in a voice channel and control the
+        queue live.
+      </p>
 
-      <MusicPlayer channels={channels} initialState={initialState} initialHistory={initialHistory} />
+      <MusicPlayer
+        channels={channels}
+        initialState={initialState}
+        initialHistory={initialHistory}
+      />
 
       <p className="hint">
         {channels.length === 0
-          ? 'No voice channels found — check the bot token / that the bot is in the server.'
-          : 'The bot joins the channel you pick. Search by name, paste a YouTube/Spotify URL, or enter liked for Spotify Liked Songs.'}
+          ? "No voice channels found — check the bot token / that the bot is in the server."
+          : "The bot joins the channel you pick. Search by name, paste a YouTube/Spotify URL, or enter liked for Spotify Liked Songs."}
       </p>
     </main>
   );
