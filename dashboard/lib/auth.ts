@@ -106,6 +106,7 @@ export function resolveRoleForDiscordId(discordId: string): Role | null {
 }
 
 export interface SupabaseDiscordIdentity {
+  id?: string;
   provider: string;
   provider_id?: string;
   identity_data?: Record<string, unknown> | null;
@@ -121,12 +122,13 @@ export interface SupabaseAuthUser {
 export function sessionUserFromSupabaseUser(user: SupabaseAuthUser | null): SessionUser | null {
   if (!user) return null;
   const identity = user.identities?.find((candidate) => candidate.provider === 'discord');
-  if (!identity?.provider_id) return null;
+  const discordId = identity?.provider_id ?? identity?.id;
+  if (!discordId) return null;
 
-  const role = resolveRoleForDiscordId(identity.provider_id);
+  const role = resolveRoleForDiscordId(discordId);
   if (!role) return null;
 
-  const data = identity.identity_data ?? {};
+  const data = identity?.identity_data ?? {};
   const username =
     (typeof data.username === 'string' && data.username) ||
     (typeof data.global_name === 'string' && data.global_name) ||
@@ -134,7 +136,7 @@ export function sessionUserFromSupabaseUser(user: SupabaseAuthUser | null): Sess
     'Discord user';
   const avatar = typeof data.avatar === 'string' ? data.avatar : null;
 
-  return { id: identity.provider_id, username, avatar, role };
+  return { id: discordId, username, avatar, role };
 }
 
 /**
