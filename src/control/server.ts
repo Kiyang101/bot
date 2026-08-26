@@ -22,7 +22,8 @@ import type { TtsProvider } from '../lib/voiceAI/providers/types';
 import { musicManager } from '../lib/music/musicSession';
 import { resolve as resolveTracks } from '../lib/music/ytdlp';
 import type { LoopMode, MusicState, Effect } from '../lib/music/types';
-import { prisma } from '../lib/db';
+import { assertSupabaseResult } from '../lib/database';
+import { getSupabaseAdmin } from '../lib/supabase';
 
 interface SpeakBody {
   channelId?: string;
@@ -304,7 +305,10 @@ export function startControlServer(client: Client, onStop: () => void): void {
         return;
       }
       try {
-        const runtime = await prisma.botRuntime.findUnique({ where: { id: 1 } });
+        const runtime = assertSupabaseResult(
+          'read BotRuntime',
+          await getSupabaseAdmin().from('BotRuntime').select('*').eq('id', 1).maybeSingle(),
+        );
         sendJson(res, 200, { ok: true, runtime });
       } catch (err) {
         sendJson(res, 500, { error: err instanceof Error ? err.message : 'database unavailable' });
