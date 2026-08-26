@@ -46,6 +46,9 @@ export const EFFECT_LABELS: Record<Effect, string> = {
  */
 export const DEFAULT_INTENSITY = 50;
 
+/** Starting playback volume for new music sessions. */
+export const DEFAULT_VOLUME = 80;
+
 /** A flat snapshot of a guild's player, used to render embeds and replies. */
 export interface MusicState {
   current: Track | null;

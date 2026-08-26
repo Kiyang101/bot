@@ -31,3 +31,49 @@ test('resolves the Discord provider user id from Supabase identity id', () => {
     process.env.ADMIN_USER_IDS = oldAdmin;
   }
 });
+
+test('does not expose the Supabase email when Discord username data is unavailable', () => {
+  const oldAdmin = process.env.ADMIN_USER_IDS;
+  process.env.ADMIN_USER_IDS = 'discord-user';
+  try {
+    const user = sessionUserFromSupabaseUser({
+      id: 'supabase-user',
+      email: 'private@example.com',
+      identities: [{ id: 'discord-user', provider: 'discord' }],
+    });
+    assert.equal(user?.username, 'Discord user');
+  } finally {
+    process.env.ADMIN_USER_IDS = oldAdmin;
+  }
+});
+
+test('uses the Discord username mirrored in Supabase user metadata', () => {
+  const oldAdmin = process.env.ADMIN_USER_IDS;
+  process.env.ADMIN_USER_IDS = 'discord-user';
+  try {
+    const user = sessionUserFromSupabaseUser({
+      id: 'supabase-user',
+      email: 'private@example.com',
+      user_metadata: { username: 'discord-handle' },
+      identities: [{ id: 'discord-user', provider: 'discord' }],
+    });
+    assert.equal(user?.username, 'discord-handle');
+  } finally {
+    process.env.ADMIN_USER_IDS = oldAdmin;
+  }
+});
+
+test('uses the Discord display name stored in Supabase user metadata', () => {
+  const oldAdmin = process.env.ADMIN_USER_IDS;
+  process.env.ADMIN_USER_IDS = 'discord-user';
+  try {
+    const user = sessionUserFromSupabaseUser({
+      id: 'supabase-user',
+      user_metadata: { full_name: 'kiyang#0' },
+      identities: [{ id: 'discord-user', provider: 'discord' }],
+    });
+    assert.equal(user?.username, 'kiyang#0');
+  } finally {
+    process.env.ADMIN_USER_IDS = oldAdmin;
+  }
+});

@@ -8,12 +8,12 @@
 // Which Discord server the dashboard is pinned to (set by the GuildSwitcher or a
 // ?guild= link). Declared here so the edge middleware can import it without
 // pulling in next/headers via lib/guild.
-export const GUILD_COOKIE = 'guildId';
+export const GUILD_COOKIE = "guildId";
 // Marks a no-login session granted by a server-scoped /dashboard link, holding
 // the guild that link is locked to. Distinct from GUILD_COOKIE so a logged-in
 // admin's normal server pin is never confused with a public guest lock.
-export const GUEST_LINK_COOKIE = 'megu_guest_guild';
-export type Role = 'admin' | 'member';
+export const GUEST_LINK_COOKIE = "megu_guest_guild";
+export type Role = "admin" | "member";
 
 export interface SessionUser {
   id: string;
@@ -24,19 +24,19 @@ export interface SessionUser {
 
 /** Pages each role is allowed to open. Members are confined to Speak + Music. */
 export const ROLE_PATHS: Record<Role, string[]> = {
-  admin: ['/', '/speak', '/music', '/config'],
-  member: ['/speak', '/music'],
+  admin: ["/", "/speak", "/music", "/config"],
+  member: ["/speak", "/music"],
 };
 
 /** Where to send a user after login / when they hit a page above their role. */
 export function homePathFor(role: Role): string {
-  return role === 'admin' ? '/' : '/music';
+  return role === "admin" ? "/" : "/music";
 }
 
 /** True if `role` may view `pathname` (ignoring query string). */
 export function canAccess(role: Role, pathname: string): boolean {
   const allowed = ROLE_PATHS[role];
-  return allowed.some((p) => pathname === p || pathname.startsWith(p + '/'));
+  return allowed.some((p) => pathname === p || pathname.startsWith(p + "/"));
 }
 
 /**
@@ -52,18 +52,20 @@ function localHosts(): string[] {
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean);
   }
-  return ['localhost', '127.0.0.1', '::1'];
+  return ["localhost", "127.0.0.1", "::1"];
 }
 
 /** Pull the request host, preferring the forwarded host ngrok sets. */
-export function requestHost(get: (name: string) => string | null | undefined): string | null {
-  return get('x-forwarded-host') ?? get('host') ?? null;
+export function requestHost(
+  get: (name: string) => string | null | undefined,
+): string | null {
+  return get("x-forwarded-host") ?? get("host") ?? null;
 }
 
 /** True when the request came in on a trusted local host. */
 export function isLocalHost(host: string | null | undefined): boolean {
   if (!host) return false;
-  const h = host.split(':')[0].toLowerCase();
+  const h = host.split(":")[0].toLowerCase();
   return localHosts().includes(h);
 }
 
@@ -72,16 +74,19 @@ export function isLocalHost(host: string | null | undefined): boolean {
  * it came in over ngrok / the public internet). Members are returned unchanged.
  * This is what limits remote visitors to the Speak + Music pages.
  */
-export function capRoleForHost(user: SessionUser, host: string | null | undefined): SessionUser {
-  if (user.role === 'admin' && !isLocalHost(host)) {
-    return { ...user, role: 'member' };
+export function capRoleForHost(
+  user: SessionUser,
+  host: string | null | undefined,
+): SessionUser {
+  if (user.role === "admin" && !isLocalHost(host)) {
+    return { ...user, role: "member" };
   }
   return user;
 }
 
 function parseIds(raw: string | undefined): Set<string> {
   return new Set(
-    (raw ?? '')
+    (raw ?? "")
       .split(/[\s,]+/)
       .map((s) => s.trim())
       .filter(Boolean),
@@ -95,8 +100,8 @@ function parseIds(raw: string | undefined): Set<string> {
 export function roleForUser(userId: string): Role | null {
   const admins = parseIds(process.env.ADMIN_USER_IDS);
   const members = parseIds(process.env.MEMBER_USER_IDS);
-  if (admins.has(userId)) return 'admin';
-  if (members.has(userId)) return 'member';
+  if (admins.has(userId)) return "admin";
+  if (members.has(userId)) return "member";
   return null;
 }
 
@@ -115,13 +120,25 @@ export interface SupabaseDiscordIdentity {
 export interface SupabaseAuthUser {
   id: string;
   email?: string | null;
+  user_metadata?: Record<string, unknown> | null;
   identities?: SupabaseDiscordIdentity[] | null;
 }
 
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  return values.find(
+    (value): value is string =>
+      typeof value === "string" && value.trim().length > 0,
+  );
+}
+
 /** Convert a verified Supabase Discord identity into the app's role-aware user. */
-export function sessionUserFromSupabaseUser(user: SupabaseAuthUser | null): SessionUser | null {
+export function sessionUserFromSupabaseUser(
+  user: SupabaseAuthUser | null,
+): SessionUser | null {
   if (!user) return null;
-  const identity = user.identities?.find((candidate) => candidate.provider === 'discord');
+  const identity = user.identities?.find(
+    (candidate) => candidate.provider === "discord",
+  );
   const discordId = identity?.provider_id ?? identity?.id;
   if (!discordId) return null;
 
@@ -129,12 +146,26 @@ export function sessionUserFromSupabaseUser(user: SupabaseAuthUser | null): Sess
   if (!role) return null;
 
   const data = identity?.identity_data ?? {};
+  const metadata = user.user_metadata ?? {};
   const username =
-    (typeof data.username === 'string' && data.username) ||
-    (typeof data.global_name === 'string' && data.global_name) ||
-    user.email ||
-    'Discord user';
-  const avatar = typeof data.avatar === 'string' ? data.avatar : null;
+    firstNonEmptyString(
+      data.username,
+      metadata.username,
+      data.preferred_username,
+      metadata.preferred_username,
+      data.user_name,
+      metadata.user_name,
+      data.global_name,
+      metadata.global_name,
+      data.display_name,
+      metadata.display_name,
+      data.full_name,
+      metadata.full_name,
+      data.name,
+      metadata.name,
+    ) ?? "Discord user";
+
+  const avatar = typeof data.avatar === "string" ? data.avatar : null;
 
   return { id: discordId, username, avatar, role };
 }
@@ -146,10 +177,11 @@ export function sessionUserFromSupabaseUser(user: SupabaseAuthUser | null): Sess
  * it can never weaken a real deployment.
  */
 export function devBypassUser(): SessionUser | null {
-  if (process.env.NODE_ENV === 'production') return null;
+  if (process.env.NODE_ENV === "production") return null;
   const role = process.env.DEV_AUTH_BYPASS;
-  if (role !== 'admin' && role !== 'member') return null;
-  const id = parseIds(process.env.ADMIN_USER_IDS).values().next().value ?? 'dev';
+  if (role !== "admin" && role !== "member") return null;
+  const id =
+    parseIds(process.env.ADMIN_USER_IDS).values().next().value ?? "dev";
   return { id, username: `dev-${role}`, avatar: null, role };
 }
 
@@ -162,11 +194,13 @@ export function devBypassUser(): SessionUser | null {
  * Returns null on local hosts or when the flag is unset. Note that even with
  * "admin", capRoleForHost() still caps remote guests to member.
  */
-export function guestUserForHost(host: string | null | undefined): SessionUser | null {
+export function guestUserForHost(
+  host: string | null | undefined,
+): SessionUser | null {
   const role = process.env.PUBLIC_GUEST_ACCESS;
-  if (role !== 'admin' && role !== 'member') return null;
+  if (role !== "admin" && role !== "member") return null;
   if (isLocalHost(host)) return null;
-  return { id: 'guest', username: 'guest', avatar: null, role };
+  return { id: "guest", username: "guest", avatar: null, role };
 }
 
 /**
@@ -189,7 +223,7 @@ export function forcedGuildId(host: string | null | undefined): string | null {
  */
 export function publicLinkEnabled(): boolean {
   const v = process.env.DASHBOARD_PUBLIC_LINK?.toLowerCase();
-  return v === 'true' || v === '1';
+  return v === "true" || v === "1";
 }
 
 /**
@@ -198,13 +232,17 @@ export function publicLinkEnabled(): boolean {
  * a member (Speak + Music only), locked to that one server. Returns null when
  * the feature is off or there's no link cookie.
  */
-export function linkGuestUser(guildFromCookie: string | undefined | null): SessionUser | null {
+export function linkGuestUser(
+  guildFromCookie: string | undefined | null,
+): SessionUser | null {
   if (!publicLinkEnabled() || !guildFromCookie) return null;
-  return { id: 'guest', username: 'guest', avatar: null, role: 'member' };
+  return { id: "guest", username: "guest", avatar: null, role: "member" };
 }
 
 /** The guild a /dashboard-link guest is locked to, or null if not applicable. */
-export function linkGuestGuildId(guildFromCookie: string | undefined | null): string | null {
+export function linkGuestGuildId(
+  guildFromCookie: string | undefined | null,
+): string | null {
   if (!publicLinkEnabled() || !guildFromCookie) return null;
   return guildFromCookie;
 }

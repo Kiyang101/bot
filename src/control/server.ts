@@ -21,7 +21,7 @@ import { synthesize as synthesizeDefault } from '../lib/voiceAI/tts';
 import type { TtsProvider } from '../lib/voiceAI/providers/types';
 import { musicManager } from '../lib/music/musicSession';
 import { resolve as resolveTracks } from '../lib/music/ytdlp';
-import type { LoopMode, MusicState, Effect } from '../lib/music/types';
+import { DEFAULT_VOLUME, type LoopMode, type MusicState, type Effect } from '../lib/music/types';
 import { assertSupabaseResult } from '../lib/database';
 import { getSupabaseAdmin } from '../lib/supabase';
 
@@ -158,7 +158,7 @@ function emptyMusicState(): MusicState {
     loop: 'off',
     effect: 'off',
     intensity: 50,
-    volume: 50,
+    volume: DEFAULT_VOLUME,
     positionSec: 0,
     playbackRate: 1,
     paused: false,

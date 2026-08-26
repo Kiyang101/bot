@@ -24,7 +24,7 @@ import {
 } from '@discordjs/voice';
 import type { VoiceBasedChannel, GuildTextBasedChannel, Message } from 'discord.js';
 import type { Track, LoopMode, MusicState, Effect } from './types';
-import { EFFECTS, DEFAULT_INTENSITY } from './types';
+import { EFFECTS, DEFAULT_INTENSITY, DEFAULT_VOLUME } from './types';
 import { createAudioStream, getStreamUrl, effectPlaybackRate, type AudioStream } from './ytdlp';
 import { nowPlayingEmbed, controlComponents } from './ui';
 import { registerDuckable, unregisterDuckable } from '../voice/ducking';
@@ -41,7 +41,7 @@ function clampIntensity(n: number): number {
   return Math.min(100, Math.max(0, Math.round(n)));
 }
 
-const DEFAULT_VOLUME = Math.min(100, Math.max(0, envInt('MUSIC_DEFAULT_VOLUME', 50)));
+const CONFIGURED_DEFAULT_VOLUME = Math.min(100, Math.max(0, envInt('MUSIC_DEFAULT_VOLUME', DEFAULT_VOLUME)));
 const IDLE_TIMEOUT_MS = envInt('MUSIC_IDLE_TIMEOUT_MS', 30 * 60 * 1_000);
 const MAX_QUEUE = envInt('MUSIC_MAX_QUEUE', 100);
 
@@ -92,7 +92,7 @@ class MusicSession {
   private loop: LoopMode = 'off';
   private effect: Effect = 'off';
   private intensity = DEFAULT_INTENSITY;
-  private volume = DEFAULT_VOLUME;
+  private volume = CONFIGURED_DEFAULT_VOLUME;
   private currentStream: AudioStream | null = null;
   /** Direct media URL for the current track (resolved once, reused for seeks). */
   private currentUrl: string | null = null;
