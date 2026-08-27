@@ -101,6 +101,9 @@ current overlay finishes, or after `Stop sound` is used.
      rejected within the global library).
    - Volume normalization / gain slider.
    - Fade in and fade out controls.
+   - Waveform editor with draggable start/end handles, selected-range
+     highlighting, and preview of only the selected range.
+   - Trimmed duration readout and `Save trim` action.
    - Browser preview with native audio controls.
 4. Library list with name, duration, category, upload date, and `Uploaded by`.
    Each row has `Edit` and `Delete` only when the current user is allowed. An
@@ -119,6 +122,8 @@ Add a migration with a `Sound` table containing:
 - `category` — category label.
 - `color` — validated preset token/hex value.
 - `storagePath` — private storage object path, never a client-supplied URL.
+- `sourceStoragePath` — private path to the original uploaded file, retained so
+  the trim can be changed later without re-uploading.
 - `mimeType` — accepted audio MIME type.
 - `sizeBytes` — original upload size.
 - `durationSec` — decoded duration when available.
@@ -127,17 +132,22 @@ Add a migration with a `Sound` table containing:
 - `shortcut` — nullable normalized key.
 - `gainDb` — bounded gain value.
 - `fadeInMs`, `fadeOutMs` — bounded integer values.
+- `trimStartMs`, `trimEndMs` — bounded source-file offsets; the saved playable
+  clip is always the selected range.
 - `sortOrder` — integer, default 0.
 - `createdAt`, `updatedAt` — timestamps.
 
-Use a private Supabase Storage bucket for audio files. Store objects under a
-user-owned path such as `sounds/{uploadedById}/{soundId}`; the path is not
+Use a private Supabase Storage bucket for audio files. Store the original under
+a user-owned path such as `sounds/{uploadedById}/{soundId}/source` and the
+processed playable clip under a sibling `playable` path; neither path is
 guild-scoped. All authenticated dashboard users can list and use the global
 library, while ownership and admin role determine mutation rights. Read/list
 operations return signed preview URLs with a short expiry; playback requests
-use the same server-side lookup and do not expose arbitrary storage paths. A
-later implementation can add soft deletion, but v1 should hard-delete the
-storage object and row together with an actionable error if either step fails.
+use the same server-side lookup and do not expose arbitrary storage paths.
+Re-trimming reprocesses the retained source file rather than degrading an
+already-trimmed copy. A later implementation can add soft deletion, but v1
+should hard-delete both storage objects and the row together with an
+actionable error if either step fails.
 
 ## Data flow and boundaries
 
@@ -179,15 +189,31 @@ storage object and row together with an actionable error if either step fails.
 - Client validates file extension/type and size immediately.
 - Server action re-validates the file metadata and size, derives uploader
   identity from the session, uploads to a user-scoped private storage path,
-  writes the `Sound` row, and revalidates both soundboard routes.
+  measures the source duration, writes the `Sound` row, and revalidates both
+  soundboard routes.
 - If database insertion fails, the uploaded object is removed as cleanup and
   the user sees a retryable error.
+
+### Trim flow
+
+- The client decodes the source file with the Web Audio API to draw a compact
+  waveform and provides draggable start/end handles.
+- Preview uses the local source file and selected range, so dragging handles is
+  immediate and does not require a server round trip.
+- The server validates `trimStartMs < trimEndMs` and that both values fit inside
+  the measured source duration, then uses ffmpeg to create the playable clip
+  from the retained source object. The generated clip replaces the previous
+  playable object only after processing succeeds.
+- If processing fails, the original sound and previous playable clip remain
+  intact and the editor keeps the user's selected range for retry.
 
 ### Edit/delete flow
 
 - Server actions re-check role/ownership for every global-library mutation;
   selected guild is not part of sound ownership.
-- Editing updates metadata only unless a new audio file is explicitly chosen.
+- Editing updates metadata only unless a new audio file or trim range is
+  explicitly chosen. A trim change updates the derived playable clip and final
+  duration, not the retained source file.
 - Deletion removes storage and row, then revalidates both routes.
 - Any failed mutation returns a typed `{ ok, message }` result matching the
   dashboard's existing action pattern.
@@ -230,6 +256,12 @@ same sound from being played in another server.
   `Bot offline` status and disable only Discord playback.
 - Upload error: keep the selected file and metadata in the form, display the
   exact correction needed, and allow retry.
+- Audio decode error: explain that the waveform could not be generated and
+  keep the original file available for retry or replacement.
+- Invalid trim range: identify the minimum clip length and require the end
+  handle to remain after the start handle.
+- Trim processing: show a processing state, keep other library controls
+  usable, and preserve the prior playable clip if the server fails.
 - Duplicate shortcut: identify the conflicting sound by name.
 - Delete error: keep the row and confirmation visible with a retry action.
 - Pending actions: disable only the affected control, preserve the rest of
@@ -243,10 +275,14 @@ same sound from being played in another server.
   action visibility.
 - `app/soundboard/manage/SoundManager.tsx`: upload, edit, preview, and delete
   UI state.
+- `app/soundboard/manage/WaveformEditor.tsx`: Web Audio waveform rendering,
+  trim handles, range preview, and accessible keyboard adjustments.
 - `app/soundboard/actions.ts`: typed server actions for play, upload, edit,
   delete, and reorder.
 - `dashboard/lib/sounds.ts`: query, validation, signed URL, and storage
   helpers.
+- `dashboard/lib/audio.ts`: source-duration validation, ffmpeg trim processing,
+  and safe replacement of derived playable objects.
 - `supabase/migrations/<timestamp>_soundboard.sql`: schema, indexes,
   grants, and policies appropriate for the server-side admin client pattern.
 - `app/layout.tsx` and `lib/auth.ts`: Soundboard navigation and role access.
@@ -270,6 +306,8 @@ same sound from being played in another server.
 - The same global library is displayed regardless of selected guild; the
   selected guild only controls where playback is sent.
 - A sound is always one-shot and never loops.
+- Users can generate a waveform, select a start/end range, preview it, and
+  save a trimmed playable clip without losing the retained source file.
 - Empty, offline, pending, and failure states are readable and actionable.
 - Keyboard activation, visible focus, semantic labels, and reduced-motion
   behavior are verified manually.
@@ -280,7 +318,6 @@ same sound from being played in another server.
 
 - Anonymous/public access without dashboard authentication.
 - Guild-specific sound libraries.
-- Waveform generation or audio trimming in the browser.
 - Sound-to-sound queues, sound-to-sound layering, or per-user rate limiting.
 - Drag-to-reorder on touch; buttons are sufficient for the first release.
 - Automatic moderation/transcription of uploaded audio.
