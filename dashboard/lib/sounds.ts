@@ -1,3 +1,4 @@
+import 'server-only';
 import { assertSupabaseResult } from './database';
 import { mapSoundRow as mapValidatedSoundRow } from './sound-validation';
 import type { SoundRecord } from './sound-types';
@@ -48,7 +49,23 @@ export async function getSound(id: string): Promise<SoundRecord | null> {
 /** Creates a short-lived URL for an internal Sound storage object. */
 export async function getSignedSoundUrl(path: string): Promise<string> {
   if (!isSoundPath(path)) throw new Error('Sound storage path is invalid.');
-  const result = await createAdminClient().storage.from(SOUND_BUCKET).createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
+  const client = createAdminClient();
+  let sound = assertSupabaseResult(
+    'look up sound storage path',
+    await client
+      .from('Sound')
+      .select('id')
+      .eq('storagePath', path)
+      .maybeSingle(),
+  );
+  if (!sound) {
+    sound = assertSupabaseResult(
+      'look up sound source storage path',
+      await client.from('Sound').select('id').eq('sourceStoragePath', path).maybeSingle(),
+    );
+  }
+  if (!sound) throw new Error('Sound storage path is not registered.');
+  const result = await client.storage.from(SOUND_BUCKET).createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
   const signed = assertSupabaseResult('create sound signed URL', result);
   if (!signed?.signedUrl) throw new Error('create sound signed URL: no signed URL was returned.');
   return signed.signedUrl;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { trimSourceFile } from './audio';
-import { mapSoundRow } from './sounds';
+import { estimateNormalizedWavBytes, trimSourceFile } from './audio';
+import { mapSoundRow } from './sound-validation';
 
 function createWavFixture(durationMs: number): Buffer {
   const sampleRate = 8_000;
@@ -40,6 +40,22 @@ test('trim processing rejects an end before start', async () => {
     }),
     /Trim range must fit inside the source duration/,
   );
+});
+
+test('trim processing rejects an unsupported declared MIME type', async () => {
+  await assert.rejects(
+    trimSourceFile({
+      source: createWavFixture(500),
+      mimeType: 'application/octet-stream',
+      trimStartMs: 100,
+      trimEndMs: 300,
+    }),
+    /Sound must be an MP3, WAV, or OGG file/,
+  );
+});
+
+test('normalized PCM output estimate exceeds the 10 MiB cap before processing', () => {
+  assert.ok(estimateNormalizedWavBytes(60_000) > 10 * 1024 * 1024);
 });
 
 test('trim processing returns a playable buffer for a WAV source', async () => {

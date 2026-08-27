@@ -3,10 +3,14 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import ffmpegPath from 'ffmpeg-static';
-import { MAX_SOUND_BYTES, validateTrimRange } from './sound-validation';
+import { MAX_SOUND_BYTES, validateTrimRange, validateUploadMeta } from './sound-validation';
 
 const AUDIO_PROCESSING_UNAVAILABLE = 'Audio processing is unavailable on this dashboard host.';
 const INVALID_AUDIO_MESSAGE = 'The uploaded audio file could not be processed.';
+const NORMALIZED_WAV_SAMPLE_RATE = 48_000;
+const NORMALIZED_WAV_CHANNELS = 2;
+const NORMALIZED_WAV_BYTES_PER_SAMPLE = 2;
+const WAV_HEADER_BYTES = 44;
 
 type TrimSourceFileInput = {
   source: Buffer | Uint8Array;
@@ -30,15 +34,15 @@ function runFfmpeg(args: string[]): Promise<ProcessResult> {
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-    child.once('error', (error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT' || error.code === 'EACCES') {
-        reject(new Error(AUDIO_PROCESSING_UNAVAILABLE));
-        return;
-      }
-      reject(error);
-    });
+    child.once('error', () => reject(new Error(AUDIO_PROCESSING_UNAVAILABLE)));
     child.once('close', (exitCode) => resolve({ exitCode, stderr }));
   });
+}
+
+/** Returns the minimum byte count for the selected normalized PCM WAV duration. */
+export function estimateNormalizedWavBytes(durationMs: number): number {
+  const frameCount = Math.ceil((durationMs / 1_000) * NORMALIZED_WAV_SAMPLE_RATE);
+  return WAV_HEADER_BYTES + frameCount * NORMALIZED_WAV_CHANNELS * NORMALIZED_WAV_BYTES_PER_SAMPLE;
 }
 
 function parseDurationSeconds(output: string): number | null {
@@ -59,9 +63,8 @@ async function readDurationSeconds(filePath: string): Promise<number> {
 
 /** Trims a retained source into a normalized, bounded WAV clip without modifying the source. */
 export async function trimSourceFile(input: TrimSourceFileInput): Promise<{ buffer: Buffer; durationSec: number }> {
-  if (!input.source.length || input.source.length > MAX_SOUND_BYTES) {
-    throw new Error(INVALID_AUDIO_MESSAGE);
-  }
+  const uploadMeta = validateUploadMeta('source', input.mimeType, input.source.length);
+  if (!uploadMeta.ok) throw new Error(uploadMeta.message);
 
   const directory = await mkdtemp(join(tmpdir(), 'soundboard-trim-'));
   const sourcePath = join(directory, 'source');
@@ -76,6 +79,9 @@ export async function trimSourceFile(input: TrimSourceFileInput): Promise<{ buff
       sourceDurationMs: sourceDurationSec * 1_000,
     });
     if (!range.ok) throw new Error(range.message);
+    if (estimateNormalizedWavBytes(range.value.trimEndMs - range.value.trimStartMs) > MAX_SOUND_BYTES) {
+      throw new Error(INVALID_AUDIO_MESSAGE);
+    }
 
     const result = await runFfmpeg([
       '-hide_banner',
@@ -85,13 +91,18 @@ export async function trimSourceFile(input: TrimSourceFileInput): Promise<{ buff
       '-i', sourcePath,
       '-vn',
       '-ac', '2',
-      '-ar', '48000',
+      '-ar', String(NORMALIZED_WAV_SAMPLE_RATE),
       '-c:a', 'pcm_s16le',
       playablePath,
     ]);
     if (result.exitCode !== 0) throw new Error(INVALID_AUDIO_MESSAGE);
 
-    const outputStats = await stat(playablePath);
+    let outputStats;
+    try {
+      outputStats = await stat(playablePath);
+    } catch {
+      throw new Error(INVALID_AUDIO_MESSAGE);
+    }
     if (outputStats.size <= 44 || outputStats.size > MAX_SOUND_BYTES) {
       throw new Error(INVALID_AUDIO_MESSAGE);
     }
