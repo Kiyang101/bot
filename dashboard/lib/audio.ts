@@ -22,23 +22,71 @@ type TrimSourceFileInput = {
 type ProcessResult = { exitCode: number | null; stderr: string };
 
 const UNSUPPORTED_AUDIO_MESSAGE = 'Sound must be an MP3, WAV, or OGG file.';
+const MPEG1_LAYER3_BITRATES_KBPS = [
+  0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+] as const;
+const MPEG2_LAYER3_BITRATES_KBPS = [
+  0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160,
+] as const;
+const MPEG_SAMPLE_RATES = {
+  0b00: [11_025, 12_000, 8_000],
+  0b10: [22_050, 24_000, 16_000],
+  0b11: [44_100, 48_000, 32_000],
+} as const;
 
 function startsWithBytes(source: Uint8Array, bytes: number[]): boolean {
   return bytes.every((byte, index) => source[index] === byte);
 }
 
-function isMp3FrameHeader(source: Uint8Array): boolean {
-  if (source.length < 4 || source[0] !== 0xff) return false;
-  const version = (source[1] >> 3) & 0b11;
-  const layer = (source[1] >> 1) & 0b11;
-  const bitrate = (source[2] >> 4) & 0b1111;
-  const sampleRate = (source[2] >> 2) & 0b11;
-  return (source[1] & 0b1110_0000) === 0b1110_0000
-    && version !== 0b01
-    && layer !== 0
-    && bitrate !== 0
-    && bitrate !== 0b1111
-    && sampleRate !== 0b11;
+function hasCompleteMp3Frame(source: Uint8Array, offset: number): boolean {
+  if (offset < 0 || source.length - offset < 4 || source[offset] !== 0xff) return false;
+  const version = (source[offset + 1] >> 3) & 0b11;
+  const layer = (source[offset + 1] >> 1) & 0b11;
+  const bitrateIndex = (source[offset + 2] >> 4) & 0b1111;
+  const sampleRateIndex = (source[offset + 2] >> 2) & 0b11;
+  const padding = (source[offset + 2] >> 1) & 0b1;
+  const emphasis = source[offset + 3] & 0b11;
+  if (
+    (source[offset + 1] & 0b1110_0000) !== 0b1110_0000
+    || version === 0b01
+    || layer !== 0b01
+    || bitrateIndex === 0
+    || bitrateIndex === 0b1111
+    || sampleRateIndex === 0b11
+    || emphasis === 0b10
+  ) {
+    return false;
+  }
+
+  const sampleRates = MPEG_SAMPLE_RATES[version as keyof typeof MPEG_SAMPLE_RATES];
+  const bitrates = version === 0b11 ? MPEG1_LAYER3_BITRATES_KBPS : MPEG2_LAYER3_BITRATES_KBPS;
+  const sampleRate = sampleRates[sampleRateIndex];
+  const bitrate = bitrates[bitrateIndex] * 1_000;
+  const coefficient = version === 0b11 ? 144 : 72;
+  const frameLength = Math.floor((coefficient * bitrate) / sampleRate) + padding;
+  return frameLength >= 4 && source.length - offset >= frameLength;
+}
+
+function id3AudioOffset(source: Uint8Array): number | null {
+  if (!startsWithBytes(source, [0x49, 0x44, 0x33]) || source.length < 10) return null;
+  const version = source[3];
+  const revision = source[4];
+  const flags = source[5];
+  const reservedFlagsMask = version === 2 ? 0b0011_1111 : version === 3 ? 0b0001_1111 : 0b0000_1111;
+  if (
+    version < 2
+    || version > 4
+    || revision === 0xff
+    || (flags & reservedFlagsMask) !== 0
+    || source.subarray(6, 10).some((byte) => (byte & 0x80) !== 0)
+  ) {
+    return null;
+  }
+
+  const tagSize = source.subarray(6, 10).reduce((size, byte) => (size << 7) | byte, 0);
+  const footerSize = version === 4 && (flags & 0b0001_0000) !== 0 ? 10 : 0;
+  const audioOffset = 10 + tagSize + footerSize;
+  return audioOffset <= source.length ? audioOffset : null;
 }
 
 /**
@@ -50,7 +98,8 @@ export function detectSupportedAudioMimeType(source: Uint8Array): 'audio/mpeg' |
     return 'audio/wav';
   }
   if (startsWithBytes(source, [0x4f, 0x67, 0x67, 0x53])) return 'audio/ogg';
-  if (startsWithBytes(source, [0x49, 0x44, 0x33]) || isMp3FrameHeader(source)) return 'audio/mpeg';
+  const mp3Offset = startsWithBytes(source, [0x49, 0x44, 0x33]) ? id3AudioOffset(source) : 0;
+  if (mp3Offset !== null && hasCompleteMp3Frame(source, mp3Offset)) return 'audio/mpeg';
   return null;
 }
 

@@ -1,7 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { estimateNormalizedWavBytes, trimSourceFile } from './audio';
+import { detectSupportedAudioMimeType, estimateNormalizedWavBytes, trimSourceFile } from './audio';
 import { mapSoundRow } from './sound-validation';
+
+function createMpeg1Layer3Frame(): Buffer {
+  const frame = Buffer.alloc(417);
+  frame.set([0xff, 0xfb, 0x90, 0x00]);
+  return frame;
+}
+
+function createId3TaggedMp3(): Buffer {
+  const tag = Buffer.from([
+    0x49, 0x44, 0x33,
+    0x04, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x03,
+    0x01, 0x02, 0x03,
+  ]);
+  return Buffer.concat([tag, createMpeg1Layer3Frame()]);
+}
 
 function createWavFixture(durationMs: number): Buffer {
   const sampleRate = 8_000;
@@ -64,6 +80,31 @@ test('trim processing rejects unsupported source bytes forged with an allowed MI
     }),
     /Sound must be an MP3, WAV, or OGG file/,
   );
+});
+
+test('audio detection rejects an ID3 tag without an MPEG frame after its declared payload', () => {
+  const id3Only = Buffer.from([
+    0x49, 0x44, 0x33,
+    0x04, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x04,
+    0xde, 0xad, 0xbe, 0xef,
+  ]);
+
+  assert.equal(detectSupportedAudioMimeType(id3Only), null);
+});
+
+test('audio detection rejects a plausible MPEG header when its frame is truncated', () => {
+  const truncatedFrame = Buffer.alloc(100);
+  truncatedFrame.set([0xff, 0xfb, 0x90, 0x00]);
+
+  assert.equal(detectSupportedAudioMimeType(truncatedFrame), null);
+});
+
+test('audio detection keeps complete MP3 frames and WAV/OGG signatures supported', () => {
+  assert.equal(detectSupportedAudioMimeType(createMpeg1Layer3Frame()), 'audio/mpeg');
+  assert.equal(detectSupportedAudioMimeType(createId3TaggedMp3()), 'audio/mpeg');
+  assert.equal(detectSupportedAudioMimeType(createWavFixture(100)), 'audio/wav');
+  assert.equal(detectSupportedAudioMimeType(Buffer.from('OggS\x00\x02')), 'audio/ogg');
 });
 
 test('normalized PCM output estimate exceeds the 10 MiB cap before processing', () => {

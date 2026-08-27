@@ -197,6 +197,87 @@ test('upload rejects unsupported source bytes forged with an allowed MIME label 
   assert.equal(playableUploaded, false);
 });
 
+test('upload rejects ID3-prefixed unsupported data before processing or storage', async () => {
+  const id3Only = new Uint8Array([
+    0x49, 0x44, 0x33,
+    0x04, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x04,
+    0xde, 0xad, 0xbe, 0xef,
+  ]);
+  let trimmed = false;
+  let sourceUploaded = false;
+  let playableUploaded = false;
+  const actions = createSoundboardActions(
+    createDependencies({
+      trimSourceFile: async () => {
+        trimmed = true;
+        return { buffer: Buffer.from('clip'), durationSec: 1 };
+      },
+      uploadSource: async () => {
+        sourceUploaded = true;
+        return ownSound.sourceStoragePath;
+      },
+      replacePlayableClip: async () => {
+        playableUploaded = true;
+        return ownSound.storagePath;
+      },
+    }),
+  );
+
+  const result = await actions.uploadSound({
+    name: 'Fake tagged MP3',
+    category: 'Reactions',
+    color: '#5865f2',
+    shortcut: null,
+    gainDb: 0,
+    fadeInMs: 0,
+    fadeOutMs: 0,
+    file: {
+      type: 'audio/mpeg',
+      size: id3Only.byteLength,
+      arrayBuffer: async () => id3Only.buffer,
+    },
+    sourceDurationMs: 1_000,
+    trimStartMs: 0,
+    trimEndMs: 500,
+  });
+
+  assert.deepEqual(result, { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' });
+  assert.equal(trimmed, false);
+  assert.equal(sourceUploaded, false);
+  assert.equal(playableUploaded, false);
+});
+
+test('trim rejects a truncated MPEG frame before processing or playable storage', async () => {
+  const truncatedFrame = new Uint8Array(100);
+  truncatedFrame.set([0xff, 0xfb, 0x90, 0x00]);
+  let trimmed = false;
+  let playableUploaded = false;
+  const actions = createSoundboardActions(
+    createDependencies({
+      downloadSource: async () => new Blob([truncatedFrame], { type: 'audio/mpeg' }),
+      trimSourceFile: async () => {
+        trimmed = true;
+        return { buffer: Buffer.from('clip'), durationSec: 1 };
+      },
+      replacePlayableClip: async () => {
+        playableUploaded = true;
+        return ownSound.storagePath;
+      },
+    }),
+  );
+
+  const result = await actions.trimSound({
+    soundId: ownSound.id,
+    trimStartMs: 0,
+    trimEndMs: 500,
+  });
+
+  assert.deepEqual(result, { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' });
+  assert.equal(trimmed, false);
+  assert.equal(playableUploaded, false);
+});
+
 test('a busy control response becomes a typed soundboard busy error', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ error: 'soundboard_busy' }), { status: 409 });
