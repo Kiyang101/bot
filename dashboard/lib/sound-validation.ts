@@ -76,7 +76,8 @@ export function canDeleteSound(user: MutatingUser, sound: OwnedSound): boolean {
 type SoundRow = Record<string, unknown>;
 
 export function mapSoundRow(row: SoundRow): SoundRecord {
-  const value = (camel: string, snake: string = camel) => row[camel] ?? row[snake];
+  const value = (camel: string, snake: string = camel) =>
+    Object.prototype.hasOwnProperty.call(row, camel) ? row[camel] : row[snake];
   return {
     id: value('id') as string,
     name: value('name') as string,
