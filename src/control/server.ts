@@ -190,6 +190,21 @@ function boundedNumber(
   return resolved;
 }
 
+async function resolveSoundboardChannel(
+  client: Client,
+  channelId: string,
+  guildId: string,
+): Promise<VoiceBasedChannel> {
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  if (!channel || !channel.isVoiceBased()) {
+    throw new Error('channelId is not a voice channel the bot can see');
+  }
+  if (channel.guild?.id !== guildId) {
+    throw new Error('channelId belongs to a different Discord server than guildId');
+  }
+  return channel as VoiceBasedChannel;
+}
+
 /** Handle a one-shot soundboard command without mutating the music queue. */
 export async function handleSoundboard(
   client: Client,
@@ -203,15 +218,17 @@ export async function handleSoundboard(
     throw new Error('loop is not supported for soundboard playback');
   }
 
+  const channelId = (body.channelId ?? '').trim();
+  if (!channelId) throw new Error('channelId is required');
+
   if (action === 'stop') {
+    await resolveSoundboardChannel(client, channelId, guildId);
     const session = sessions.get(guildId);
     if (!session) throw new Error('No active soundboard session in this server.');
     session.stopSound();
     return { ok: true };
   }
 
-  const channelId = (body.channelId ?? '').trim();
-  if (!channelId) throw new Error('channelId is required');
   const rawAudioUrl = (body.audioUrl ?? '').trim();
   let audioUrl: URL;
   try {
@@ -223,18 +240,12 @@ export async function handleSoundboard(
     throw new Error('audioUrl must be a server-resolved HTTP(S) URL');
   }
 
-  const channel = await client.channels.fetch(channelId).catch(() => null);
-  if (!channel || !channel.isVoiceBased()) {
-    throw new Error('channelId is not a voice channel the bot can see');
-  }
-  if (channel.guild?.id !== guildId) {
-    throw new Error('channelId belongs to a different Discord server than guildId');
-  }
+  const channel = await resolveSoundboardChannel(client, channelId, guildId);
 
   const gainDb = boundedNumber(body.gainDb, 0, -24, 12, 'gainDb');
   const fadeInMs = boundedNumber(body.fadeInMs, 0, 0, 5_000, 'fadeInMs', true);
   const fadeOutMs = boundedNumber(body.fadeOutMs, 0, 0, 5_000, 'fadeOutMs', true);
-  await sessions.getOrCreate(guildId).playSound(channel as VoiceBasedChannel, audioUrl.href, {
+  await sessions.getOrCreate(guildId).playSound(channel, audioUrl.href, {
     gainDb,
     fadeInMs,
     fadeOutMs,

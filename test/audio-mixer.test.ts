@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { EventEmitter, once } from 'node:events';
 import { PassThrough, Readable } from 'node:stream';
 import { VoiceConnectionStatus, type VoiceConnection } from '@discordjs/voice';
 import type { Client, VoiceBasedChannel } from 'discord.js';
+import type { Track } from '../src/lib/music/types';
 import { AudioMixer } from '../src/lib/voice/audioMixer';
 import { createAudioStream } from '../src/lib/music/ytdlp';
 import { musicManager, SoundboardBusyError } from '../src/lib/music/musicSession';
@@ -20,6 +22,82 @@ function pcmFrame(sample: number): Buffer {
   for (let offset = 0; offset < FRAME_BYTES; offset += 2) frame.writeInt16LE(sample, offset);
   return frame;
 }
+
+function wavBuffer(sample: number, frames = 48_000): Buffer {
+  const dataSize = frames * 2 * 2;
+  const wav = Buffer.concat([wavHeader(dataSize), Buffer.alloc(dataSize)]);
+  for (let offset = 44; offset < wav.length; offset += 2) wav.writeInt16LE(sample, offset);
+  return wav;
+}
+
+function wavHeader(dataSize: number): Buffer {
+  const wav = Buffer.alloc(44);
+  wav.write('RIFF', 0, 'ascii');
+  wav.writeUInt32LE(36 + dataSize, 4);
+  wav.write('WAVE', 8, 'ascii');
+  wav.write('fmt ', 12, 'ascii');
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(2, 22);
+  wav.writeUInt32LE(48_000, 24);
+  wav.writeUInt32LE(48_000 * 2 * 2, 28);
+  wav.writeUInt16LE(2 * 2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36, 'ascii');
+  wav.writeUInt32LE(dataSize, 40);
+  return wav;
+}
+
+async function startWavServer(
+  routes: Record<
+    string,
+    (res: http.ServerResponse, req: http.IncomingMessage) => void | Promise<void>
+  >,
+): Promise<{ url(path: string): string; close(): Promise<void> }> {
+  const sockets = new Set<import('node:net').Socket>();
+  const server = http.createServer((req, res) => {
+    const handler = routes[req.url ?? ''];
+    if (!handler) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    void Promise.resolve(handler(res, req)).catch((error) => {
+      res.destroy(error);
+    });
+  });
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  return {
+    url: (path) => `http://127.0.0.1:${address.port}${path}`,
+    close: () => new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+      for (const socket of sockets) socket.destroy();
+    }),
+  };
+}
+
+function writeAudio(res: http.ServerResponse, audio: Buffer, rangeHeader?: string): void {
+  const match = /^bytes=(\d+)-(\d*)$/.exec(rangeHeader ?? '');
+  const start = match ? Number(match[1]) : 0;
+  const requestedEnd = match?.[2] ? Number(match[2]) : audio.length - 1;
+  const end = Math.min(requestedEnd, audio.length - 1);
+  const body = audio.subarray(start, end + 1);
+  const headers: http.OutgoingHttpHeaders = {
+    'Accept-Ranges': 'bytes',
+    'Content-Length': body.length,
+    'Content-Type': 'audio/wav',
+  };
+  if (match) headers['Content-Range'] = `bytes ${start}-${end}/${audio.length}`;
+  res.writeHead(match ? 206 : 200, headers);
+  res.end(body);
+}
+
 async function readFrame(mixer: AudioMixer): Promise<Buffer> {
   const chunk = mixer.read(FRAME_BYTES) as Buffer | null;
   if (chunk) return chunk;
@@ -160,6 +238,67 @@ test('clears a source that closes without emitting end', async () => {
   assert.equal(await outcome, 'ended');
 });
 
+const track: Track = {
+  title: 'Test Track',
+  url: 'https://youtube.example.test/watch?v=test',
+  durationSec: 60,
+  thumbnail: null,
+  uploader: null,
+  requestedById: 'user-1',
+  requestedByTag: 'Tester',
+};
+
+test('ignores stale music streams that become ready after a newer stream is active', async () => {
+  const guildId = 'guild-stale-stream';
+  const session = musicManager.getOrCreate(guildId);
+  let releaseSlow!: () => void;
+  let markSlowRequested!: () => void;
+  const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve; });
+  const slowRequested = new Promise<void>((resolve) => { markSlowRequested = resolve; });
+  const server = await startWavServer({
+    '/slow.wav': async (res, req) => {
+      markSlowRequested();
+      await slowGate;
+      writeAudio(res, wavBuffer(1_111), req.headers.range);
+    },
+    '/fast.wav': (res, req) => writeAudio(res, wavBuffer(2_222), req.headers.range),
+  });
+
+  try {
+    const unsafeSession = session as unknown as {
+      current: Track | null;
+      currentUrl: string | null;
+      currentStream: { destroy(): void } | null;
+      startStream(track: Track, seekSec: number): Promise<boolean | void>;
+    };
+    unsafeSession.current = track;
+    unsafeSession.currentUrl = server.url('/slow.wav');
+    const staleStart = unsafeSession.startStream(track, 0.001);
+    await slowRequested;
+
+    unsafeSession.currentUrl = server.url('/fast.wav');
+    await unsafeSession.startStream(track, 0.002);
+    const fastStream = unsafeSession.currentStream;
+    assert.ok(fastStream);
+    let fastDestroyCalls = 0;
+    const originalFastDestroy = fastStream.destroy.bind(fastStream);
+    fastStream.destroy = () => {
+      fastDestroyCalls += 1;
+      originalFastDestroy();
+    };
+
+    releaseSlow();
+    await staleStart;
+
+    assert.strictEqual(unsafeSession.currentStream, fastStream);
+    assert.equal(fastDestroyCalls, 0);
+  } finally {
+    session.stop();
+    releaseSlow();
+    await server.close();
+  }
+});
+
 function clientFor(channelGuildId = 'guild-1'): Client {
   const channel = {
     id: 'voice-1',
@@ -171,6 +310,13 @@ function clientFor(channelGuildId = 'guild-1'): Client {
   } as unknown as Client;
 }
 
+function readyConnection(): VoiceConnection {
+  return {
+    state: { status: VoiceConnectionStatus.Ready },
+    subscribe: () => undefined,
+  } as unknown as VoiceConnection;
+}
+
 const playBody: SoundboardBody = {
   guildId: 'guild-1',
   channelId: 'voice-1',
@@ -180,33 +326,62 @@ const playBody: SoundboardBody = {
   fadeOutMs: 80,
 };
 
-test('plays through the overlay boundary without changing music controls or queue', async () => {
-  const queue = ['music-a', 'music-b'];
-  let pauseCalls = 0;
-  let stopCalls = 0;
-  let received: unknown;
-  const session = {
-    playSound: async (channel: VoiceBasedChannel, audioUrl: string, options: unknown) => {
-      received = { channelId: channel.id, audioUrl, options };
-    },
-    stopSound: () => {},
-    pause: () => { pauseCalls += 1; },
-    stop: () => { stopCalls += 1; },
-  };
-  const sessions: SoundboardSessions = {
-    get: () => session,
-    getOrCreate: () => session,
-  };
-
-  assert.deepEqual(await handleSoundboard(clientFor(), playBody, 'play', sessions), { ok: true });
-  assert.deepEqual(received, {
-    channelId: 'voice-1',
-    audioUrl: playBody.audioUrl,
-    options: { gainDb: -3, fadeInMs: 40, fadeOutMs: 80 },
+test('MusicSession soundboard play and stop preserve active music state', async () => {
+  const guildId = 'guild-preserve-music';
+  const session = musicManager.getOrCreate(guildId);
+  const main = new PassThrough();
+  const server = await startWavServer({
+    '/overlay.wav': (res) => writeAudio(res, wavBuffer(1_000)),
   });
-  assert.equal(pauseCalls, 0);
-  assert.equal(stopCalls, 0);
-  assert.deepEqual(queue, ['music-a', 'music-b']);
+
+  try {
+    const unsafeSession = session as unknown as {
+      current: Track | null;
+      queue: Track[];
+      mixer: AudioMixer;
+      player: { pause(): boolean; stop(force?: boolean): boolean };
+      ensureConnection(channel: VoiceBasedChannel): VoiceConnection;
+    };
+    const nextTrack = { ...track, title: 'Queued Track', url: 'https://youtube.example.test/next' };
+    unsafeSession.current = track;
+    unsafeSession.queue = [nextTrack];
+    unsafeSession.mixer.setMain(main);
+    main.write(pcmFrame(4_000));
+
+    let pauseCalls = 0;
+    let stopCalls = 0;
+    const originalPause = unsafeSession.player.pause.bind(unsafeSession.player);
+    const originalStop = unsafeSession.player.stop.bind(unsafeSession.player);
+    unsafeSession.player.pause = () => {
+      pauseCalls += 1;
+      return originalPause();
+    };
+    unsafeSession.player.stop = (force?: boolean) => {
+      stopCalls += 1;
+      return originalStop(force);
+    };
+    unsafeSession.ensureConnection = () => readyConnection();
+    const channel = {
+      id: 'voice-1',
+      guild: { id: guildId },
+    } as VoiceBasedChannel;
+
+    await session.playSound(channel, server.url('/overlay.wav'), {
+      gainDb: 0,
+      fadeInMs: 0,
+      fadeOutMs: 0,
+    });
+    session.stopSound();
+
+    assert.equal(pauseCalls, 0);
+    assert.equal(stopCalls, 0);
+    assert.deepEqual(session.getState().queue, [nextTrack]);
+    assert.strictEqual(session.getState().current, track);
+    assert.equal(session.pause(), true);
+  } finally {
+    session.stop();
+    await server.close();
+  }
 });
 
 test('rejects loop and non-HTTP audio inputs at the control boundary', async () => {
@@ -240,24 +415,37 @@ test('rejects a voice channel owned by a different guild', async () => {
   );
 });
 
-test('stops only the active soundboard overlay', async () => {
+test('requires a same-guild voice channel before stopping the active soundboard overlay', async () => {
   let overlayStops = 0;
   let musicStops = 0;
+  let getCalls = 0;
   const session = {
     playSound: async () => {},
     stopSound: () => { overlayStops += 1; },
     stop: () => { musicStops += 1; },
   };
   const sessions: SoundboardSessions = {
-    get: () => session,
+    get: () => {
+      getCalls += 1;
+      return session;
+    },
     getOrCreate: () => session,
   };
+  await assert.rejects(
+    handleSoundboard(clientFor(), { guildId: 'guild-1' }, 'stop', sessions),
+    /channelId is required/,
+  );
+  await assert.rejects(
+    handleSoundboard(clientFor('guild-2'), { guildId: 'guild-1', channelId: 'voice-1' }, 'stop', sessions),
+    /different Discord server/,
+  );
   assert.deepEqual(
-    await handleSoundboard(clientFor(), { guildId: 'guild-1' }, 'stop', sessions),
+    await handleSoundboard(clientFor(), { guildId: 'guild-1', channelId: 'voice-1' }, 'stop', sessions),
     { ok: true },
   );
   assert.equal(overlayStops, 1);
   assert.equal(musicStops, 0);
+  assert.equal(getCalls, 1);
 });
 
 test('maps an occupied overlay to the typed busy response and keeps unexpected errors internal', () => {

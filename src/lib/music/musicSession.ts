@@ -103,6 +103,8 @@ class MusicSession {
   private intensity = DEFAULT_INTENSITY;
   private volume = CONFIGURED_DEFAULT_VOLUME;
   private currentStream: AudioStream | null = null;
+  /** Invalidates async main-stream work that no longer owns playback state. */
+  private streamGeneration = 0;
   private currentSoundStream: AudioStream | null = null;
   private soundRequest: symbol | null = null;
   /** Direct media URL for the current track (resolved once, reused for seeks). */
@@ -131,6 +133,7 @@ class MusicSession {
     // The player resource is permanent; natural main-source completion drives
     // the music queue while leaving any soundboard overlay untouched.
     this.mixer.on('mainEnded', () => {
+      this.streamGeneration += 1;
       // A track that "finishes" almost instantly never really played — usually
       // a failed download or an empty stream. Flag it so it's not a silent skip.
       const playedMs = this.mixer.mainPlaybackDurationMs;
@@ -296,7 +299,7 @@ class MusicSession {
     this.currentUrl = null; // force a fresh URL resolve for the new track
     console.log(`[music] ▶ playing "${next.title}" in guild ${this.guildId} (queue: ${this.queue.length})`);
     try {
-      await this.startStream(next, 0);
+      if (!(await this.startStream(next, 0))) return;
     } catch (err) {
       console.error(`[music] failed to start "${next.title}":`, (err as Error).message);
       // Skip the unplayable track and move on.
@@ -312,38 +315,53 @@ class MusicSession {
    * `seekSec`. Resolves the direct URL on first use for the current track and
    * reuses it for subsequent seeks / effect changes.
    */
-  private async startStream(track: Track, seekSec: number): Promise<void> {
+  private async startStream(track: Track, seekSec: number): Promise<boolean> {
+    const generation = ++this.streamGeneration;
+    const isCurrentOperation = () => generation === this.streamGeneration;
+
     // Build the NEW stream first (URL resolution may await). We must NOT tear
     // down the currently-playing stream until the replacement is ready. The
     // old source remains in the mixer until the new source has decoded bytes.
-    let audio: AudioStream;
-    if (seekSec > 0) {
-      // Seeking needs a direct, range-seekable URL (resolved once per track).
-      if (!this.currentUrl) this.currentUrl = await getStreamUrl(track);
-      audio = createAudioStream({
-        url: this.currentUrl,
-        effect: this.effect,
-        intensity: this.intensity,
-        volume: this.volume,
-        seekSec,
-        output: 'pcm',
-      });
-    } else {
-      // Normal playback uses the robust yt-dlp pipe.
-      audio = createAudioStream({
-        track,
-        effect: this.effect,
-        intensity: this.intensity,
-        volume: this.volume,
-        output: 'pcm',
-      });
-    }
+    let audio: AudioStream | null = null;
 
     try {
+      if (seekSec > 0) {
+        // Seeking needs a direct, range-seekable URL (resolved once per track).
+        let streamUrl = this.currentUrl;
+        if (!streamUrl) {
+          streamUrl = await getStreamUrl(track);
+          if (!isCurrentOperation()) return false;
+          this.currentUrl = streamUrl;
+        }
+        audio = createAudioStream({
+          url: streamUrl,
+          effect: this.effect,
+          intensity: this.intensity,
+          volume: this.volume,
+          seekSec,
+          output: 'pcm',
+        });
+      } else {
+        // Normal playback uses the robust yt-dlp pipe.
+        audio = createAudioStream({
+          track,
+          effect: this.effect,
+          intensity: this.intensity,
+          volume: this.volume,
+          output: 'pcm',
+        });
+      }
+
       await audio.ready;
     } catch (error) {
-      audio.destroy();
+      audio?.destroy();
+      if (!isCurrentOperation()) return false;
       throw error;
+    }
+
+    if (!isCurrentOperation()) {
+      audio.destroy();
+      return false;
     }
 
     const previous = this.currentStream;
@@ -352,6 +370,7 @@ class MusicSession {
     this.mixer.setMain(audio.stream);
     // New main source is installed — safe to kill the old stream's processes.
     previous?.destroy();
+    return true;
   }
 
   /**
@@ -374,8 +393,7 @@ class MusicSession {
   async seek(targetSec: number): Promise<boolean> {
     if (!this.current || this.current.durationSec == null) return false;
     const pos = Math.min(this.current.durationSec, Math.max(0, targetSec));
-    await this.startStream(this.current, pos);
-    void this.refreshNowPlaying();
+    if (await this.startStream(this.current, pos)) void this.refreshNowPlaying();
     return true;
   }
 
@@ -385,14 +403,18 @@ class MusicSession {
     if (!track) return;
     const pos = this.positionSec();
     void this.startStream(track, pos)
-      .then(() => this.refreshNowPlaying())
+      .then((started) => {
+        if (started) void this.refreshNowPlaying();
+      })
       .catch((err) => {
         // The seek path (direct URL) can be flaky — never let an effect change
         // silence playback. Fall back to the robust pipe from the start.
         console.error('[music] restart-at-position failed, restarting track:', (err as Error).message);
         this.currentUrl = null;
         void this.startStream(track, 0)
-          .then(() => this.refreshNowPlaying())
+          .then((started) => {
+            if (started) void this.refreshNowPlaying();
+          })
           .catch((e) => console.error('[music] restart failed:', (e as Error).message));
       });
   }
@@ -400,6 +422,7 @@ class MusicSession {
   /** Skip the current track. Returns the skipped track, if any. */
   skip(): Track | null {
     const skipped = this.current;
+    this.streamGeneration += 1;
     // loop:'track' would replay the same song on skip — temporarily bypass it.
     if (this.loop === 'track') {
       this.current = null;
@@ -415,6 +438,7 @@ class MusicSession {
   /** Stop everything, clear the queue, and leave the channel. */
   stop(): void {
     this.leaving = true;
+    this.streamGeneration += 1;
     this.queue = [];
     this.current = null;
     this.stopSound();
