@@ -7,8 +7,8 @@ CREATE TABLE public."Sound" (
   name text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 60),
   category text NOT NULL CHECK (char_length(category) BETWEEN 1 AND 40),
   color text NOT NULL,
-  "storagePath" text NOT NULL CHECK ("storagePath" = 'sounds/' || "uploadedById" || '/' || id::text || '/playable'),
-  "sourceStoragePath" text NOT NULL CHECK ("sourceStoragePath" = 'sounds/' || "uploadedById" || '/' || id::text || '/source'),
+  "storagePath" text NOT NULL,
+  "sourceStoragePath" text NOT NULL,
   "mimeType" text NOT NULL CHECK ("mimeType" IN ('audio/mpeg', 'audio/wav', 'audio/ogg')),
   "sizeBytes" bigint NOT NULL CHECK ("sizeBytes" BETWEEN 0 AND 10485760),
   "durationSec" numeric CHECK ("durationSec" IS NULL OR "durationSec" >= 0),
@@ -26,7 +26,11 @@ CREATE TABLE public."Sound" (
   ),
   "sortOrder" integer NOT NULL DEFAULT 0,
   "createdAt" timestamp(3) without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "updatedAt" timestamp(3) without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP
+  "updatedAt" timestamp(3) without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "Sound_storagePath_contract"
+    CHECK ("storagePath" = 'sounds/' || "uploadedById" || '/' || id::text || '/playable'),
+  CONSTRAINT "Sound_sourceStoragePath_contract"
+    CHECK ("sourceStoragePath" = 'sounds/' || "uploadedById" || '/' || id::text || '/source')
 );
 
 CREATE INDEX "Sound_sortOrder_createdAt_idx"
