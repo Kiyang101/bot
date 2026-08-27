@@ -3,8 +3,9 @@
 ## Goal
 
 Add a server-scoped soundboard to the Megu dashboard so Discord users can
-quickly trigger short sounds into the bot's active voice session, and so
-authorized users can upload and maintain the shared sound library.
+quickly trigger short sounds into the bot's active voice session, including
+over the top of music without interrupting it, and so authorized users can
+upload and maintain the shared sound library.
 
 The experience has two modes:
 
@@ -21,6 +22,7 @@ guild cookie, Supabase data layer, and localhost-only bot control endpoint.
 | --- | --- | --- |
 | Open soundboard | Yes | Yes |
 | Play / preview any sound | Yes | Yes |
+| Play one sound over active music | Yes | Yes |
 | Upload a sound | Yes | Yes |
 | Edit own sound | Yes | Yes |
 | Delete own sound | Yes | Yes |
@@ -72,6 +74,12 @@ removes the pulse.
 Each pad supports mouse, touch, and keyboard activation. The accessible label
   includes sound name, duration, and category. The pressed state is immediate;
   the action result is announced in a live region for screen readers.
+
+When a sound is playing, all other sound pads remain visible but become
+temporarily disabled. The active pad and playback dock show `Playing over
+music` (or `Playing` when no music is active) and the remaining duration. There
+is no sound-to-sound queue in v1: the next sound can be triggered only after the
+current overlay finishes, or after `Stop sound` is used.
 
 ### Sound management (`/soundboard/manage`)
 
@@ -141,12 +149,22 @@ object and row together with an actionable error if either step fails.
 ### Play flow
 
 - Client pad click calls a server action with the sound id and selected guild.
-- Server action verifies session, guild access, and sound ownership scope.
+- Server action verifies session, selected-guild access, and that the sound
+  belongs to the selected guild.
 - Server action resolves the private storage object and sends a sound command
   to the bot control endpoint.
-- The bot reuses its existing voice connection/session abstraction and returns
-  a clear error if it is stopped, not connected to a voice channel, or cannot
-  decode the file.
+- The bot uses one audio pipeline per guild: the current music source and one
+  optional soundboard overlay source are decoded to the same 48 kHz stereo PCM
+  format, mixed, and wrapped in the single `AudioPlayer` resource subscribed to
+  the guild's `VoiceConnection`.
+- Starting an overlay never pauses, seeks, replaces, or clears the music
+  source. The overlay is removed from the mixer when its stream ends or when
+  `Stop sound` is requested.
+- If an overlay is already active, the control endpoint rejects a second play
+  request with a typed busy response; it does not queue or layer the second
+  sound.
+- The bot returns a clear error if it is stopped, cannot connect to the active
+  voice channel, cannot decode the file, or the overlay slot is busy.
 - Client marks the pad and playback dock as active only after a successful
   command; failure leaves the previous playback state intact and shows an
   inline actionable message.
@@ -168,6 +186,27 @@ object and row together with an actionable error if either step fails.
 - Deletion removes storage and row, then revalidates both routes.
 - Any failed mutation returns a typed `{ ok, message }` result matching the
   dashboard's existing action pattern.
+
+## Audio architecture decision
+
+The current bot uses one `AudioPlayer` per guild and sends music as Ogg/Opus
+passthrough. A second player cannot be subscribed independently to the same
+Discord voice connection, so overlay playback must not be implemented as a
+second `AudioPlayer` or by replacing the current music resource.
+
+Introduce a small per-guild audio coordinator (or extract the responsibility
+from `MusicSession`) that owns the connection, one player, and a PCM mixer. The
+existing music stream is adapted to provide a decoded PCM source to the mixer;
+the soundboard source is decoded into the same format and gets its own bounded
+gain and optional fade envelope. The mixer emits silence when no source is
+active and keeps the connection reusable. Music controls continue to operate
+on the main source; soundboard stop only removes the overlay source.
+
+The control endpoint adds `/soundboard/play` and `/soundboard/stop`. The play
+command carries a server-resolved audio input plus the sound's gain, loop, and
+fade settings. The bot owns the actual file fetch and decode so the dashboard
+never sends untrusted local paths to the process. The existing control secret
+and localhost restriction remain in force.
 
 ## Error, empty, and loading states
 
@@ -200,8 +239,10 @@ object and row together with an actionable error if either step fails.
   grants, and policies appropriate for the server-side admin client pattern.
 - `app/layout.tsx` and `lib/auth.ts`: Soundboard navigation and role access.
 - `app/globals.css`: soundboard-specific responsive layout and states.
-- Bot control endpoint and music/voice session code: add a sound playback
-  command using the existing control secret and voice-session lifecycle.
+- `src/lib/voice/mixer.ts`: one-player PCM mixing and the single active overlay
+  slot per guild.
+- Bot control endpoint and music/voice session code: add sound playback and
+  stop commands plus the one-player PCM mixer described above.
 
 ## Verification and acceptance criteria
 
@@ -226,6 +267,6 @@ object and row together with an actionable error if either step fails.
 
 - Public sound sharing across guilds.
 - Waveform generation or audio trimming in the browser.
-- Multi-sound queues, layered playback, or per-user rate limiting.
+- Sound-to-sound queues, sound-to-sound layering, or per-user rate limiting.
 - Drag-to-reorder on touch; buttons are sufficient for the first release.
 - Automatic moderation/transcription of uploaded audio.
