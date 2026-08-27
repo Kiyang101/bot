@@ -38,8 +38,8 @@ function startsWithBytes(source: Uint8Array, bytes: number[]): boolean {
   return bytes.every((byte, index) => source[index] === byte);
 }
 
-function hasCompleteMp3Frame(source: Uint8Array, offset: number): boolean {
-  if (offset < 0 || source.length - offset < 4 || source[offset] !== 0xff) return false;
+function mpegFrameLength(source: Uint8Array, offset: number): number | null {
+  if (offset < 0 || source.length - offset < 4 || source[offset] !== 0xff) return null;
   const version = (source[offset + 1] >> 3) & 0b11;
   const layer = (source[offset + 1] >> 1) & 0b11;
   const bitrateIndex = (source[offset + 2] >> 4) & 0b1111;
@@ -55,7 +55,7 @@ function hasCompleteMp3Frame(source: Uint8Array, offset: number): boolean {
     || sampleRateIndex === 0b11
     || emphasis === 0b10
   ) {
-    return false;
+    return null;
   }
 
   const sampleRates = MPEG_SAMPLE_RATES[version as keyof typeof MPEG_SAMPLE_RATES];
@@ -64,7 +64,17 @@ function hasCompleteMp3Frame(source: Uint8Array, offset: number): boolean {
   const bitrate = bitrates[bitrateIndex] * 1_000;
   const coefficient = version === 0b11 ? 144 : 72;
   const frameLength = Math.floor((coefficient * bitrate) / sampleRate) + padding;
-  return frameLength >= 4 && source.length - offset >= frameLength;
+  return frameLength >= 4 && source.length - offset >= frameLength ? frameLength : null;
+}
+
+function hasConsecutiveMp3Frames(source: Uint8Array, offset: number): boolean {
+  const firstFrameLength = mpegFrameLength(source, offset);
+  if (firstFrameLength === null) return false;
+
+  // A lone plausible header plus zero-fill can satisfy a frame-size check. Requiring the
+  // following frame at the calculated boundary prevents that fabricated payload from
+  // crossing the format gate while remaining tolerant of normal MPEG frame variations.
+  return mpegFrameLength(source, offset + firstFrameLength) !== null;
 }
 
 function id3AudioOffset(source: Uint8Array): number | null {
@@ -99,7 +109,7 @@ export function detectSupportedAudioMimeType(source: Uint8Array): 'audio/mpeg' |
   }
   if (startsWithBytes(source, [0x4f, 0x67, 0x67, 0x53])) return 'audio/ogg';
   const mp3Offset = startsWithBytes(source, [0x49, 0x44, 0x33]) ? id3AudioOffset(source) : 0;
-  if (mp3Offset !== null && hasCompleteMp3Frame(source, mp3Offset)) return 'audio/mpeg';
+  if (mp3Offset !== null && hasConsecutiveMp3Frames(source, mp3Offset)) return 'audio/mpeg';
   return null;
 }
 

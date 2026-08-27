@@ -9,6 +9,10 @@ function createMpeg1Layer3Frame(): Buffer {
   return frame;
 }
 
+function createRawMp3(): Buffer {
+  return Buffer.concat([createMpeg1Layer3Frame(), createMpeg1Layer3Frame()]);
+}
+
 function createId3TaggedMp3(): Buffer {
   const tag = Buffer.from([
     0x49, 0x44, 0x33,
@@ -16,7 +20,7 @@ function createId3TaggedMp3(): Buffer {
     0x00, 0x00, 0x00, 0x03,
     0x01, 0x02, 0x03,
   ]);
-  return Buffer.concat([tag, createMpeg1Layer3Frame()]);
+  return Buffer.concat([tag, createRawMp3()]);
 }
 
 function createWavFixture(durationMs: number): Buffer {
@@ -100,8 +104,12 @@ test('audio detection rejects a plausible MPEG header when its frame is truncate
   assert.equal(detectSupportedAudioMimeType(truncatedFrame), null);
 });
 
+test('audio detection rejects a single complete zero-filled MPEG frame', () => {
+  assert.equal(detectSupportedAudioMimeType(createMpeg1Layer3Frame()), null);
+});
+
 test('audio detection keeps complete MP3 frames and WAV/OGG signatures supported', () => {
-  assert.equal(detectSupportedAudioMimeType(createMpeg1Layer3Frame()), 'audio/mpeg');
+  assert.equal(detectSupportedAudioMimeType(createRawMp3()), 'audio/mpeg');
   assert.equal(detectSupportedAudioMimeType(createId3TaggedMp3()), 'audio/mpeg');
   assert.equal(detectSupportedAudioMimeType(createWavFixture(100)), 'audio/wav');
   assert.equal(detectSupportedAudioMimeType(Buffer.from('OggS\x00\x02')), 'audio/ogg');

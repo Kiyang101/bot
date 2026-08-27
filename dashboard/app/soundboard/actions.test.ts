@@ -248,6 +248,53 @@ test('upload rejects ID3-prefixed unsupported data before processing or storage'
   assert.equal(playableUploaded, false);
 });
 
+test('upload rejects a single complete zero-filled MPEG frame before processing or storage', async () => {
+  const forgedFrame = new Uint8Array(417);
+  forgedFrame.set([0xff, 0xfb, 0x90, 0x00]);
+  let trimmed = false;
+  let sourceUploaded = false;
+  let playableUploaded = false;
+  const actions = createSoundboardActions(
+    createDependencies({
+      trimSourceFile: async () => {
+        trimmed = true;
+        return { buffer: Buffer.from('clip'), durationSec: 1 };
+      },
+      uploadSource: async () => {
+        sourceUploaded = true;
+        return ownSound.sourceStoragePath;
+      },
+      replacePlayableClip: async () => {
+        playableUploaded = true;
+        return ownSound.storagePath;
+      },
+    }),
+  );
+
+  const result = await actions.uploadSound({
+    name: 'Forged MPEG frame',
+    category: 'Reactions',
+    color: '#5865f2',
+    shortcut: null,
+    gainDb: 0,
+    fadeInMs: 0,
+    fadeOutMs: 0,
+    file: {
+      type: 'audio/mpeg',
+      size: forgedFrame.byteLength,
+      arrayBuffer: async () => forgedFrame.buffer,
+    },
+    sourceDurationMs: 1_000,
+    trimStartMs: 0,
+    trimEndMs: 500,
+  });
+
+  assert.deepEqual(result, { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' });
+  assert.equal(trimmed, false);
+  assert.equal(sourceUploaded, false);
+  assert.equal(playableUploaded, false);
+});
+
 test('trim rejects a truncated MPEG frame before processing or playable storage', async () => {
   const truncatedFrame = new Uint8Array(100);
   truncatedFrame.set([0xff, 0xfb, 0x90, 0x00]);
@@ -256,6 +303,36 @@ test('trim rejects a truncated MPEG frame before processing or playable storage'
   const actions = createSoundboardActions(
     createDependencies({
       downloadSource: async () => new Blob([truncatedFrame], { type: 'audio/mpeg' }),
+      trimSourceFile: async () => {
+        trimmed = true;
+        return { buffer: Buffer.from('clip'), durationSec: 1 };
+      },
+      replacePlayableClip: async () => {
+        playableUploaded = true;
+        return ownSound.storagePath;
+      },
+    }),
+  );
+
+  const result = await actions.trimSound({
+    soundId: ownSound.id,
+    trimStartMs: 0,
+    trimEndMs: 500,
+  });
+
+  assert.deepEqual(result, { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' });
+  assert.equal(trimmed, false);
+  assert.equal(playableUploaded, false);
+});
+
+test('trim rejects a single complete zero-filled MPEG frame before processing or playable storage', async () => {
+  const forgedFrame = new Uint8Array(417);
+  forgedFrame.set([0xff, 0xfb, 0x90, 0x00]);
+  let trimmed = false;
+  let playableUploaded = false;
+  const actions = createSoundboardActions(
+    createDependencies({
+      downloadSource: async () => new Blob([forgedFrame], { type: 'audio/mpeg' }),
       trimSourceFile: async () => {
         trimmed = true;
         return { buffer: Buffer.from('clip'), durationSec: 1 };
