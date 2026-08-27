@@ -19,7 +19,11 @@ import { resolveVoicevoxUrl, resolveTtsVoice, resolveGoogleLang } from '../lib/v
 import { translateToJapanese } from '../lib/voiceAI/translate';
 import { synthesize as synthesizeDefault } from '../lib/voiceAI/tts';
 import type { TtsProvider } from '../lib/voiceAI/providers/types';
-import { musicManager } from '../lib/music/musicSession';
+import {
+  musicManager,
+  SoundboardBusyError,
+  type MusicSession,
+} from '../lib/music/musicSession';
 import { resolve as resolveTracks } from '../lib/music/ytdlp';
 import { DEFAULT_VOLUME, type LoopMode, type MusicState, type Effect } from '../lib/music/types';
 import { assertSupabaseResult } from '../lib/database';
@@ -148,6 +152,107 @@ interface MusicBody {
   effect?: Effect;
   intensity?: number;
   seconds?: number;
+}
+
+export interface SoundboardBody {
+  guildId?: string;
+  channelId?: string;
+  audioUrl?: string;
+  gainDb?: number;
+  fadeInMs?: number;
+  fadeOutMs?: number;
+}
+
+type SoundboardSession = Pick<MusicSession, 'playSound' | 'stopSound'>;
+
+export interface SoundboardSessions {
+  get(guildId: string): SoundboardSession | null;
+  getOrCreate(guildId: string): SoundboardSession;
+}
+
+function boundedNumber(
+  value: number | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+  label: string,
+  integer = false,
+): number {
+  const resolved = value ?? fallback;
+  if (
+    !Number.isFinite(resolved)
+    || resolved < min
+    || resolved > max
+    || (integer && !Number.isInteger(resolved))
+  ) {
+    throw new Error(`${label} must be ${integer ? 'an integer ' : ''}between ${min} and ${max}`);
+  }
+  return resolved;
+}
+
+/** Handle a one-shot soundboard command without mutating the music queue. */
+export async function handleSoundboard(
+  client: Client,
+  body: SoundboardBody,
+  action: 'play' | 'stop',
+  sessions: SoundboardSessions = musicManager,
+): Promise<{ ok: true }> {
+  const guildId = (body.guildId ?? '').trim();
+  if (!guildId) throw new Error('guildId is required');
+  if (Object.prototype.hasOwnProperty.call(body, 'loop')) {
+    throw new Error('loop is not supported for soundboard playback');
+  }
+
+  if (action === 'stop') {
+    const session = sessions.get(guildId);
+    if (!session) throw new Error('No active soundboard session in this server.');
+    session.stopSound();
+    return { ok: true };
+  }
+
+  const channelId = (body.channelId ?? '').trim();
+  if (!channelId) throw new Error('channelId is required');
+  const rawAudioUrl = (body.audioUrl ?? '').trim();
+  let audioUrl: URL;
+  try {
+    audioUrl = new URL(rawAudioUrl);
+  } catch {
+    throw new Error('audioUrl must be a server-resolved HTTP(S) URL');
+  }
+  if (audioUrl.protocol !== 'https:' && audioUrl.protocol !== 'http:') {
+    throw new Error('audioUrl must be a server-resolved HTTP(S) URL');
+  }
+
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  if (!channel || !channel.isVoiceBased()) {
+    throw new Error('channelId is not a voice channel the bot can see');
+  }
+  if (channel.guild?.id !== guildId) {
+    throw new Error('channelId belongs to a different Discord server than guildId');
+  }
+
+  const gainDb = boundedNumber(body.gainDb, 0, -24, 12, 'gainDb');
+  const fadeInMs = boundedNumber(body.fadeInMs, 0, 0, 5_000, 'fadeInMs', true);
+  const fadeOutMs = boundedNumber(body.fadeOutMs, 0, 0, 5_000, 'fadeOutMs', true);
+  await sessions.getOrCreate(guildId).playSound(channel as VoiceBasedChannel, audioUrl.href, {
+    gainDb,
+    fadeInMs,
+    fadeOutMs,
+  });
+  return { ok: true };
+}
+
+export function soundboardErrorResponse(error: unknown): {
+  status: 409 | 500;
+  payload: { error: string };
+} {
+  if (error instanceof SoundboardBusyError) {
+    return { status: 409, payload: { error: 'soundboard_busy' } };
+  }
+  return {
+    status: 500,
+    payload: { error: error instanceof Error ? error.message : 'unknown error' },
+  };
 }
 
 /** An empty state for guilds with no active player. */
@@ -331,7 +436,15 @@ export function startControlServer(client: Client, onStop: () => void): void {
       return;
     }
 
-    const postRoutes = ['/speak', '/leave', '/music', '/preview', '/lifecycle'];
+    const postRoutes = [
+      '/speak',
+      '/leave',
+      '/music',
+      '/preview',
+      '/lifecycle',
+      '/soundboard/play',
+      '/soundboard/stop',
+    ];
     if (req.method !== 'POST' || !postRoutes.includes(path)) {
       sendJson(res, 404, { error: 'not found' });
       return;
@@ -343,7 +456,7 @@ export function startControlServer(client: Client, onStop: () => void): void {
 
     try {
       const raw = await readBody(req);
-      const body = JSON.parse(raw || '{}') as SpeakBody & MusicBody & { guildId?: string };
+      const body = JSON.parse(raw || '{}') as SpeakBody & MusicBody & SoundboardBody;
       if (path === '/lifecycle') {
         if (body.action !== 'stop') throw new Error('unsupported lifecycle action');
         sendJson(res, 202, { ok: true, status: 'STOPPING' });
@@ -358,6 +471,15 @@ export function startControlServer(client: Client, onStop: () => void): void {
       if (path === '/music') {
         const result = await handleMusic(client, body);
         sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+      if (path === '/soundboard/play' || path === '/soundboard/stop') {
+        const result = await handleSoundboard(
+          client,
+          body,
+          path === '/soundboard/play' ? 'play' : 'stop',
+        );
+        sendJson(res, 200, result);
         return;
       }
       if (path === '/preview') {
@@ -376,7 +498,12 @@ export function startControlServer(client: Client, onStop: () => void): void {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'unknown error';
       console.error(`[control] ${path} failed:`, message);
-      sendJson(res, 500, { error: message });
+      if (path === '/soundboard/play' || path === '/soundboard/stop') {
+        const response = soundboardErrorResponse(err);
+        sendJson(res, response.status, response.payload);
+      } else {
+        sendJson(res, 500, { error: message });
+      }
     }
   });
 

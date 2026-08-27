@@ -279,8 +279,10 @@ export async function getStreamUrl(track: Track): Promise<string> {
 
 /** A live audio stream plus a way to tear down its ffmpeg process. */
 export interface AudioStream {
-  /** Raw s16le PCM (48 kHz stereo) ready for `createAudioResource`. */
+  /** Encoded Opus or raw PCM output, according to {@link StreamOptions.output}. */
   stream: Readable;
+  /** Resolves after the first decoded bytes, or rejects if ffmpeg produces none. */
+  ready: Promise<void>;
   /** Kill the ffmpeg process backing this stream. */
   destroy: () => void;
 }
@@ -299,6 +301,8 @@ export interface StreamOptions {
   track?: Track;
   /** Direct media URL from {@link getStreamUrl}, for seeking (seekSec > 0). */
   url?: string;
+  /** Output format. PCM is signed 16-bit little-endian, 48 kHz stereo. */
+  output?: 'opus' | 'pcm';
 }
 
 /**
@@ -336,9 +340,22 @@ function opusArgs(filter: string): string[] {
   ];
 }
 
+/** ffmpeg output args for the mixer's 48 kHz stereo signed 16-bit PCM input. */
+function pcmArgs(filter: string): string[] {
+  return [
+    '-vn',
+    ...(filter ? ['-af', filter] : []),
+    '-f', 's16le',
+    '-ar', '48000',
+    '-ac', '2',
+    '-',
+  ];
+}
+
 /** Wrap an ffmpeg child as an {@link AudioStream}, logging real failures. */
 function wrapFfmpeg(ff: ReturnType<typeof spawn>, label: string, alsoKill?: () => void): AudioStream {
   let killed = false;
+  let errTail = '';
 
   // Reserve buffer: ffmpeg races ahead and keeps ~10s of PCM queued so brief
   // source / CPU / network hiccups never starve the 20 ms send loop — that
@@ -350,10 +367,35 @@ function wrapFfmpeg(ff: ReturnType<typeof spawn>, label: string, alsoKill?: () =
   ff.stdout!.on('error', () => {});
 
   // Keep the tail of ffmpeg's stderr so a real failure is diagnosable.
-  let errTail = '';
   ff.stderr?.on('data', (d: Buffer) => {
     errTail = (errTail + d.toString()).slice(-600);
   });
+  const ready = new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      ff.stdout?.off('data', onData);
+      ff.off('exit', onExit);
+      ff.off('error', onError);
+    };
+    const onData = () => {
+      cleanup();
+      resolve();
+    };
+    const onExit = (_code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup();
+      const detail = errTail.trim() || (signal ? `terminated by ${signal}` : 'ffmpeg produced no audio');
+      reject(new Error(`Could not decode audio (${label}): ${detail}`));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(new Error(`Could not decode audio (${label}): ${error.message}`));
+    };
+    ff.stdout?.once('data', onData);
+    ff.once('exit', onExit);
+    ff.once('error', onError);
+  });
+  // Callers await this, but also mark it handled during intentional early
+  // teardown so a killed replacement stream cannot become an unhandled reject.
+  ready.catch(() => {});
   ff.on('exit', (code, signal) => {
     if (!killed && signal !== 'SIGKILL' && code && code !== 0) {
       console.error(`[music] ffmpeg(${label}) exited ${code}: ${errTail.trim() || '(no stderr)'}`);
@@ -375,7 +417,7 @@ function wrapFfmpeg(ff: ReturnType<typeof spawn>, label: string, alsoKill?: () =
     console.error(`[music] ffmpeg(${label}) spawn error:`, e.message);
     destroy();
   });
-  return { stream: buffer, destroy };
+  return { stream: buffer, ready, destroy };
 }
 
 /**
@@ -387,16 +429,22 @@ function wrapFfmpeg(ff: ReturnType<typeof spawn>, label: string, alsoKill?: () =
  * - Seeking (`seekSec` > 0): ffmpeg reads the direct `url` and input-seeks with
  *   `-ss` before `-i` (fast, byte-range based).
  *
- * Both output Ogg-Opus (48 kHz stereo) for `createAudioResource` with
- * `StreamType.OggOpus` — passed straight to Discord without re-encoding.
+ * Output can be Ogg-Opus passthrough or raw 48 kHz stereo PCM for the per-guild
+ * mixer. A direct `url` with no seek is used for server-resolved sound files.
  */
 export function createAudioStream(opts: StreamOptions): AudioStream {
-  const { effect = 'off', intensity = 50, volume = 100, seekSec = 0 } = opts;
+  const {
+    effect = 'off',
+    intensity = 50,
+    volume = 100,
+    seekSec = 0,
+    output = 'opus',
+  } = opts;
   const filter = buildFilterChain(effect, intensity, volume);
+  const outputArgs = output === 'pcm' ? pcmArgs(filter) : opusArgs(filter);
 
-  // Seek path: read the direct URL with input seek.
-  if (seekSec > 0) {
-    if (!opts.url) throw new Error('Seeking requires a resolved stream URL.');
+  // Direct path: seekable music URL or a server-resolved sound file URL.
+  if (opts.url) {
     const ff = spawn(
       FFMPEG,
       [
@@ -404,20 +452,21 @@ export function createAudioStream(opts: StreamOptions): AudioStream {
         '-reconnect', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
-        '-ss', String(seekSec),
+        ...(seekSec > 0 ? ['-ss', String(seekSec)] : []),
         '-i', opts.url,
-        ...opusArgs(filter),
+        ...outputArgs,
       ],
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
-    return wrapFfmpeg(ff, 'seek');
+    return wrapFfmpeg(ff, seekSec > 0 ? 'seek' : 'url');
   }
+  if (seekSec > 0) throw new Error('Seeking requires a resolved stream URL.');
 
   // Normal path: yt-dlp → ffmpeg pipe.
   if (!opts.track) throw new Error('createAudioStream needs a track for normal playback.');
   const ff = spawn(
     FFMPEG,
-    ['-loglevel', 'error', '-i', 'pipe:0', ...opusArgs(filter)],
+    ['-loglevel', 'error', '-i', 'pipe:0', ...outputArgs],
     { stdio: ['pipe', 'pipe', 'pipe'] },
   );
 
