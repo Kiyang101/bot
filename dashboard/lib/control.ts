@@ -27,6 +27,56 @@ export interface SpeakPayload {
   pitch?: number;
 }
 
+export interface SoundboardPlayPayload {
+  guildId: string;
+  channelId: string;
+  audioUrl: string;
+  gainDb: number;
+  fadeInMs: number;
+  fadeOutMs: number;
+}
+
+export const SOUNDBOARD_BUSY_MESSAGE = 'Soundboard is busy — wait for the current sound to finish.';
+
+/** Typed control error so the soundboard UI can keep its pads in a waiting state. */
+export class SoundboardBusyError extends Error {
+  constructor() {
+    super(SOUNDBOARD_BUSY_MESSAGE);
+    this.name = 'SoundboardBusyError';
+  }
+}
+
+async function sendSoundboardRequest(path: '/soundboard/play' | '/soundboard/stop', payload: object): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(`${CONTROL_URL}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-control-secret': CONTROL_SECRET,
+      },
+      body: JSON.stringify(payload),
+      cache: 'no-store',
+    });
+  } catch {
+    throw new Error(`Could not reach the bot at ${CONTROL_URL}. Make sure the bot is running.`);
+  }
+
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  if (res.status === 409 && data.error === 'soundboard_busy') throw new SoundboardBusyError();
+  if (!res.ok) throw new Error(data.error ?? `Bot returned HTTP ${res.status}`);
+}
+
+/** Starts one global sound as a one-shot overlay in the selected server's voice channel. */
+export async function sendSoundboardPlay(payload: SoundboardPlayPayload): Promise<void> {
+  await sendSoundboardRequest('/soundboard/play', payload);
+}
+
+/** Stops the selected server's soundboard overlay after bot-side channel validation. */
+export async function sendSoundboardStop(guildId: string, channelId: string): Promise<void> {
+  await sendSoundboardRequest('/soundboard/stop', { guildId, channelId });
+}
+
 /** Ask the bot to speak. Returns the spoken text, or throws with the bot's error. */
 export async function sendSpeak(payload: SpeakPayload): Promise<{ spoken: string }> {
   let res: Response;

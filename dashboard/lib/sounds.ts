@@ -10,6 +10,24 @@ const SIGNED_URL_TTL_SECONDS = 60 * 5;
 type StorageFile = Blob | ArrayBuffer | Uint8Array;
 type SoundStorageIdentity = { uploadedById: string; soundId: string };
 
+export type NewSoundRecord = Omit<SoundRecord, 'createdAt' | 'updatedAt'>;
+export type SoundRecordUpdate = Partial<
+  Pick<
+    SoundRecord,
+    | 'name'
+    | 'category'
+    | 'color'
+    | 'shortcut'
+    | 'gainDb'
+    | 'fadeInMs'
+    | 'fadeOutMs'
+    | 'trimStartMs'
+    | 'trimEndMs'
+    | 'durationSec'
+    | 'sortOrder'
+  >
+>;
+
 function requireStorageIdentifier(value: string, label: string): string {
   if (!value || value.includes('/') || value.includes('\\')) {
     throw new Error(`${label} is invalid.`);
@@ -44,6 +62,41 @@ export async function getSound(id: string): Promise<SoundRecord | null> {
   const result = await createAdminClient().from('Sound').select('*').eq('id', id).maybeSingle();
   const row = assertSupabaseResult('get sound', result);
   return row ? mapSoundRow(row) : null;
+}
+
+/** Inserts a fully prepared global Sound row and returns the validated record. */
+export async function insertSound(input: NewSoundRecord): Promise<SoundRecord> {
+  const result = await createAdminClient().from('Sound').insert(input).select('*').single();
+  const row = assertSupabaseResult('insert sound', result);
+  return mapSoundRow(row);
+}
+
+/** Updates trusted metadata for one global Sound record. */
+export async function updateSound(id: string, input: SoundRecordUpdate): Promise<SoundRecord> {
+  const result = await createAdminClient()
+    .from('Sound')
+    .update({ ...input, updatedAt: new Date().toISOString() })
+    .eq('id', id)
+    .select('*')
+    .single();
+  const row = assertSupabaseResult('update sound', result);
+  return mapSoundRow(row);
+}
+
+/** Deletes one global Sound row after its paired storage objects have been removed. */
+export async function deleteSoundRow(id: string): Promise<void> {
+  assertSupabaseResult('delete sound row', await createAdminClient().from('Sound').delete().eq('id', id));
+}
+
+/** Persists one position in a sequential global sound ordering batch. */
+export async function updateSoundSortOrder(id: string, sortOrder: number): Promise<void> {
+  assertSupabaseResult(
+    'update sound sort order',
+    await createAdminClient()
+      .from('Sound')
+      .update({ sortOrder, updatedAt: new Date().toISOString() })
+      .eq('id', id),
+  );
 }
 
 /** Creates a short-lived URL for an internal Sound storage object. */
@@ -91,6 +144,14 @@ export async function replacePlayableClip(input: SoundStorageIdentity & { file: 
   });
   assertSupabaseResult('replace playable sound clip', result);
   return path;
+}
+
+/** Downloads a retained source using only the fixed, server-controlled object path. */
+export async function downloadSource(input: SoundStorageIdentity): Promise<Blob> {
+  const result = await createAdminClient().storage.from(SOUND_BUCKET).download(soundPath(input, 'source'));
+  const source = assertSupabaseResult('download sound source', result);
+  if (!source) throw new Error('Sound source file is unavailable.');
+  return source;
 }
 
 /** Removes both internal storage objects belonging to a sound. */
