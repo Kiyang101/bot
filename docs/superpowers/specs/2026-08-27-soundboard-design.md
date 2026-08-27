@@ -2,10 +2,11 @@
 
 ## Goal
 
-Add a server-scoped soundboard to the Megu dashboard so Discord users can
-quickly trigger short sounds into the bot's active voice session, including
-over the top of music without interrupting it, and so authorized users can
-upload and maintain the shared sound library.
+Add a global sound library to the Megu dashboard so Discord users can quickly
+trigger short sounds into the selected Discord server's active voice session,
+including over the top of music without interrupting it. Sounds belong to the
+user who uploaded them, but the shared library is available across Discord
+servers.
 
 The experience has two modes:
 
@@ -14,25 +15,26 @@ The experience has two modes:
   sounds.
 
 This feature uses the dashboard's existing Discord OAuth session, selected
-guild cookie, Supabase data layer, and localhost-only bot control endpoint.
+guild cookie as the playback destination, Supabase data layer, and
+localhost-only bot control endpoint.
 
 ## Access rules
 
 | Capability | Member | Admin |
 | --- | --- | --- |
-| Open soundboard | Yes | Yes |
+| Open global soundboard | Yes | Yes |
 | Play / preview any sound | Yes | Yes |
 | Play one sound over active music | Yes | Yes |
-| Upload a sound | Yes | Yes |
+| Upload a sound to the global library | Yes | Yes |
 | Edit own sound | Yes | Yes |
 | Delete own sound | Yes | Yes |
 | Edit any sound | No | Yes |
 | Reorder / categorize any sound | No | Yes |
 | Delete any sound | No | Yes |
 
-The server action must enforce these rules with the verified session user and
-selected guild. The UI only reflects permissions; it is not the security
-boundary.
+The server action must enforce these rules with the verified session user. The
+selected guild is relevant only to playback destination. The UI only reflects
+permissions; it is not the security boundary.
 
 ## Visual direction
 
@@ -57,9 +59,11 @@ removes the pulse.
 
 ### Live soundboard (`/soundboard`)
 
-1. Header with title, selected Discord server, and a `Manage sounds` link.
-2. Voice status strip showing bot connection state, active voice channel, and
-   a join/stop affordance when the control endpoint reports no playable session.
+1. Header with title, selected Discord server as the playback destination, and
+   a `Manage sounds` link.
+2. Voice status strip showing bot connection state for the selected server,
+   active voice channel, and a join/stop affordance when the control endpoint
+   reports no playable session.
 3. Search input and category chips: `All`, `Reactions`, `Memes`, `Music`, and
    `Uploaded by me`. Categories are derived from stored sounds; the default
    category chips are shown when they contain sounds and custom categories are
@@ -94,14 +98,13 @@ current overlay finishes, or after `Stop sound` is used.
      only for admins).
    - Accent color (preset swatches).
    - Keyboard shortcut (optional, one unmodified printable key; duplicates are
-     rejected within the guild).
+     rejected within the global library).
    - Volume normalization / gain slider.
-   - Loop toggle.
    - Fade in and fade out controls.
    - Browser preview with native audio controls.
 4. Library list with name, duration, category, upload date, and `Uploaded by`.
    Each row has `Edit` and `Delete` only when the current user is allowed. An
-   admin also sees reorder controls; order is persisted per guild.
+   admin also sees reorder controls; order is persisted globally.
 5. Delete becomes an inline confirmation with explicit `Delete sound` and
    `Keep sound` actions. The sound is removed from the grid after the action
    succeeds and the user is returned to the first available result if the
@@ -112,7 +115,6 @@ current overlay finishes, or after `Stop sound` is used.
 Add a migration with a `Sound` table containing:
 
 - `id` — UUID primary key.
-- `guildId` — Discord guild identifier; indexed with `sortOrder`.
 - `name` — display name.
 - `category` — category label.
 - `color` — validated preset token/hex value.
@@ -124,24 +126,26 @@ Add a migration with a `Sound` table containing:
 - `uploadedByName` — display-name snapshot for historical readability.
 - `shortcut` — nullable normalized key.
 - `gainDb` — bounded gain value.
-- `loop` — boolean, default false.
 - `fadeInMs`, `fadeOutMs` — bounded integer values.
 - `sortOrder` — integer, default 0.
 - `createdAt`, `updatedAt` — timestamps.
 
-Use a private Supabase Storage bucket for audio files. Read/list operations
-return signed preview URLs with a short expiry; playback requests use the
-same server-side lookup and do not expose arbitrary storage paths. A later
-implementation can add soft deletion, but v1 should hard-delete the storage
-object and row together with an actionable error if either step fails.
+Use a private Supabase Storage bucket for audio files. Store objects under a
+user-owned path such as `sounds/{uploadedById}/{soundId}`; the path is not
+guild-scoped. All authenticated dashboard users can list and use the global
+library, while ownership and admin role determine mutation rights. Read/list
+operations return signed preview URLs with a short expiry; playback requests
+use the same server-side lookup and do not expose arbitrary storage paths. A
+later implementation can add soft deletion, but v1 should hard-delete the
+storage object and row together with an actionable error if either step fails.
 
 ## Data flow and boundaries
 
 ### Read flow
 
 - Server page gets the selected guild and session user.
-- Server-side data helper queries sounds for that guild ordered by `sortOrder`,
-  then `createdAt`.
+- Server-side data helper queries the global sound library ordered by
+  `sortOrder`, then `createdAt`.
 - The page passes serializable sound metadata to the client board.
 - Preview URLs are generated server-side for the management view and refreshed
   when they expire.
@@ -149,8 +153,9 @@ object and row together with an actionable error if either step fails.
 ### Play flow
 
 - Client pad click calls a server action with the sound id and selected guild.
-- Server action verifies session, selected-guild access, and that the sound
-  belongs to the selected guild.
+- Server action verifies the session, that the selected guild is a valid
+  playback destination for the user, and that the requested sound exists in
+  the global library.
 - Server action resolves the private storage object and sends a sound command
   to the bot control endpoint.
 - The bot uses one audio pipeline per guild: the current music source and one
@@ -173,15 +178,15 @@ object and row together with an actionable error if either step fails.
 
 - Client validates file extension/type and size immediately.
 - Server action re-validates the file metadata and size, derives uploader
-  identity from the session, uploads to a guild-scoped private storage path,
+  identity from the session, uploads to a user-scoped private storage path,
   writes the `Sound` row, and revalidates both soundboard routes.
 - If database insertion fails, the uploaded object is removed as cleanup and
   the user sees a retryable error.
 
 ### Edit/delete flow
 
-- Server actions re-check the selected guild and role/ownership for every
-  mutation.
+- Server actions re-check role/ownership for every global-library mutation;
+  selected guild is not part of sound ownership.
 - Editing updates metadata only unless a new audio file is explicitly chosen.
 - Deletion removes storage and row, then revalidates both routes.
 - Any failed mutation returns a typed `{ ok, message }` result matching the
@@ -203,15 +208,22 @@ active and keeps the connection reusable. Music controls continue to operate
 on the main source; soundboard stop only removes the overlay source.
 
 The control endpoint adds `/soundboard/play` and `/soundboard/stop`. The play
-command carries a server-resolved audio input plus the sound's gain, loop, and
-fade settings. The bot owns the actual file fetch and decode so the dashboard
-never sends untrusted local paths to the process. The existing control secret
-and localhost restriction remain in force.
+command carries a server-resolved audio input plus the sound's gain and fade
+settings. Sound playback is always one-shot; there is no loop setting in the
+UI, database, or control payload. The bot owns the actual file fetch and decode
+so the dashboard never sends untrusted local paths to the process. The existing
+control secret and localhost restriction remain in force.
+
+The global sound library is shared across guilds, but playback state is not:
+each guild has its own audio coordinator, active music source, and one-slot
+soundboard overlay. Playing a sound in one selected server does not block the
+same sound from being played in another server.
 
 ## Error, empty, and loading states
 
-- No guild selected: show a centered setup card explaining that a Discord
-  server must be selected before sounds can be loaded.
+- No guild selected: the global library can still be browsed and previewed, but
+  show a centered setup card explaining that a Discord server must be selected
+  before Discord playback is available.
 - No sounds: show an inviting empty state with `Upload the first sound` and a
   note that users can add sounds; admins see the same action.
 - Bot unavailable: pads remain browsable and previewable, but show a clear
@@ -253,10 +265,11 @@ and localhost restriction remain in force.
 - `Uploaded by` shows the authenticated Discord identity for every sound.
 - Member can edit/delete only their own sound; admin can edit/reorder/delete
   any sound, including sounds uploaded by another user.
-- Unauthorized direct requests to server actions cannot bypass guild or role
-  checks.
-- Soundboard routes respect the selected guild and never display another
-  guild's sounds.
+- Unauthorized direct requests to server actions cannot bypass ownership or
+  role checks.
+- The same global library is displayed regardless of selected guild; the
+  selected guild only controls where playback is sent.
+- A sound is always one-shot and never loops.
 - Empty, offline, pending, and failure states are readable and actionable.
 - Keyboard activation, visible focus, semantic labels, and reduced-motion
   behavior are verified manually.
@@ -265,7 +278,8 @@ and localhost restriction remain in force.
 
 ## Out of scope for v1
 
-- Public sound sharing across guilds.
+- Anonymous/public access without dashboard authentication.
+- Guild-specific sound libraries.
 - Waveform generation or audio trimming in the browser.
 - Sound-to-sound queues, sound-to-sound layering, or per-user rate limiting.
 - Drag-to-reorder on touch; buttons are sufficient for the first release.
