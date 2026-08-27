@@ -54,6 +54,18 @@ test('trim processing rejects an unsupported declared MIME type', async () => {
   );
 });
 
+test('trim processing rejects unsupported source bytes forged with an allowed MIME label', async () => {
+  await assert.rejects(
+    trimSourceFile({
+      source: Buffer.from('fLaC'),
+      mimeType: 'audio/wav',
+      trimStartMs: 100,
+      trimEndMs: 300,
+    }),
+    /Sound must be an MP3, WAV, or OGG file/,
+  );
+});
+
 test('normalized PCM output estimate exceeds the 10 MiB cap before processing', () => {
   assert.ok(estimateNormalizedWavBytes(60_000) > 10 * 1024 * 1024);
 });

@@ -21,6 +21,39 @@ type TrimSourceFileInput = {
 
 type ProcessResult = { exitCode: number | null; stderr: string };
 
+const UNSUPPORTED_AUDIO_MESSAGE = 'Sound must be an MP3, WAV, or OGG file.';
+
+function startsWithBytes(source: Uint8Array, bytes: number[]): boolean {
+  return bytes.every((byte, index) => source[index] === byte);
+}
+
+function isMp3FrameHeader(source: Uint8Array): boolean {
+  if (source.length < 4 || source[0] !== 0xff) return false;
+  const version = (source[1] >> 3) & 0b11;
+  const layer = (source[1] >> 1) & 0b11;
+  const bitrate = (source[2] >> 4) & 0b1111;
+  const sampleRate = (source[2] >> 2) & 0b11;
+  return (source[1] & 0b1110_0000) === 0b1110_0000
+    && version !== 0b01
+    && layer !== 0
+    && bitrate !== 0
+    && bitrate !== 0b1111
+    && sampleRate !== 0b11;
+}
+
+/**
+ * Identifies the supported source container from bytes supplied to the server.
+ * The browser-provided MIME value is deliberately not used for this decision.
+ */
+export function detectSupportedAudioMimeType(source: Uint8Array): 'audio/mpeg' | 'audio/wav' | 'audio/ogg' | null {
+  if (startsWithBytes(source, [0x52, 0x49, 0x46, 0x46]) && startsWithBytes(source.subarray(8), [0x57, 0x41, 0x56, 0x45])) {
+    return 'audio/wav';
+  }
+  if (startsWithBytes(source, [0x4f, 0x67, 0x67, 0x53])) return 'audio/ogg';
+  if (startsWithBytes(source, [0x49, 0x44, 0x33]) || isMp3FrameHeader(source)) return 'audio/mpeg';
+  return null;
+}
+
 function bundledFfmpegPath(): string {
   if (!ffmpegPath) throw new Error(AUDIO_PROCESSING_UNAVAILABLE);
   return ffmpegPath;
@@ -65,6 +98,7 @@ async function readDurationSeconds(filePath: string): Promise<number> {
 export async function trimSourceFile(input: TrimSourceFileInput): Promise<{ buffer: Buffer; durationSec: number }> {
   const uploadMeta = validateUploadMeta('source', input.mimeType, input.source.length);
   if (!uploadMeta.ok) throw new Error(uploadMeta.message);
+  if (!detectSupportedAudioMimeType(input.source)) throw new Error(UNSUPPORTED_AUDIO_MESSAGE);
 
   const directory = await mkdtemp(join(tmpdir(), 'soundboard-trim-'));
   const sourcePath = join(directory, 'source');

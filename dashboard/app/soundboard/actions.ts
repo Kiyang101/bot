@@ -12,6 +12,7 @@ import {
 import type { SoundMutationResult, SoundRecord } from '../../lib/sound-types';
 import type { NewSoundRecord, SoundRecordUpdate } from '../../lib/sounds';
 import type { SoundboardPlayPayload } from '../../lib/control';
+import { detectSupportedAudioMimeType } from '../../lib/audio';
 
 export type SoundboardSound = Omit<SoundRecord, 'storagePath' | 'sourceStoragePath'>;
 export type SoundboardActionResult<T = undefined> = SoundMutationResult<T> | { ok: true; value?: T };
@@ -243,9 +244,11 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         if (!actualMeta.ok || source.byteLength !== file.size) {
           return { ok: false, message: actualMeta.ok ? 'Uploaded file size changed during upload.' : actualMeta.message };
         }
+        const sourceMimeType = detectSupportedAudioMimeType(new Uint8Array(source));
+        if (!sourceMimeType) return { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' };
         const clip = await dependencies.trimSourceFile({
           source: new Uint8Array(source),
-          mimeType: file.type,
+          mimeType: sourceMimeType,
           trimStartMs: trim.value.trimStartMs,
           trimEndMs: trim.value.trimEndMs,
         });
@@ -253,7 +256,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           uploadedById: user.id,
           soundId,
           file: source,
-          mimeType: file.type,
+          mimeType: sourceMimeType,
         });
         sourceUploaded = true;
         const storagePath = await dependencies.replacePlayableClip({
@@ -267,7 +270,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           ...metadata.value,
           storagePath,
           sourceStoragePath,
-          mimeType: file.type,
+          mimeType: sourceMimeType,
           sizeBytes: source.byteLength,
           durationSec: input.sourceDurationMs / 1_000,
           uploadedById: user.id,
@@ -332,9 +335,12 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         });
         if (!trim.ok) return trim;
         const source = await dependencies.downloadSource({ uploadedById: sound.uploadedById, soundId: sound.id });
+        const sourceBytes = new Uint8Array(await source.arrayBuffer());
+        const sourceMimeType = detectSupportedAudioMimeType(sourceBytes);
+        if (!sourceMimeType) return { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' };
         const clip = await dependencies.trimSourceFile({
-          source: new Uint8Array(await source.arrayBuffer()),
-          mimeType: sound.mimeType,
+          source: sourceBytes,
+          mimeType: sourceMimeType,
           trimStartMs: trim.value.trimStartMs,
           trimEndMs: trim.value.trimEndMs,
         });

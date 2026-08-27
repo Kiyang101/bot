@@ -152,6 +152,51 @@ test('a sound id outside the global table is rejected', async () => {
   assert.equal(signed, false);
 });
 
+test('upload rejects unsupported source bytes forged with an allowed MIME label before processing or storage', async () => {
+  let trimmed = false;
+  let sourceUploaded = false;
+  let playableUploaded = false;
+  const actions = createSoundboardActions(
+    createDependencies({
+      trimSourceFile: async () => {
+        trimmed = true;
+        return { buffer: Buffer.from('clip'), durationSec: 1 };
+      },
+      uploadSource: async () => {
+        sourceUploaded = true;
+        return ownSound.sourceStoragePath;
+      },
+      replacePlayableClip: async () => {
+        playableUploaded = true;
+        return ownSound.storagePath;
+      },
+    }),
+  );
+
+  const result = await actions.uploadSound({
+    name: 'Forged FLAC',
+    category: 'Reactions',
+    color: '#5865f2',
+    shortcut: null,
+    gainDb: 0,
+    fadeInMs: 0,
+    fadeOutMs: 0,
+    file: {
+      type: 'audio/wav',
+      size: 4,
+      arrayBuffer: async () => new Uint8Array([0x66, 0x4c, 0x61, 0x43]).buffer,
+    },
+    sourceDurationMs: 1_000,
+    trimStartMs: 0,
+    trimEndMs: 500,
+  });
+
+  assert.deepEqual(result, { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' });
+  assert.equal(trimmed, false);
+  assert.equal(sourceUploaded, false);
+  assert.equal(playableUploaded, false);
+});
+
 test('a busy control response becomes a typed soundboard busy error', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ error: 'soundboard_busy' }), { status: 409 });
