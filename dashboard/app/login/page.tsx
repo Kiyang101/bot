@@ -7,7 +7,7 @@ import LoginButton from './LoginButton';
 export const dynamic = 'force-dynamic';
 
 const ERRORS: Record<string, string> = {
-  forbidden: 'That Discord account is not on the allowlist for this dashboard.',
+  forbidden: 'Could not verify a Discord identity for this account.',
   denied: 'Login was cancelled.',
   exchange: 'Could not verify your Discord login. Please try again.',
 };

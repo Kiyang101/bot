@@ -1,19 +1,18 @@
 // Dashboard authorization helpers.
 //
-// Two roles, decided by allowlists in the environment:
-//   • admin  — the bot owner(s); full access to every page.
-//   • member — other people you explicitly allow; Speak + Music pages only.
-// Anyone not in either list is denied even after a successful Discord login.
+// Two roles, stored in Supabase:
+//   • admin  — full access to every page.
+//   • member — Speak + Music pages only.
 //
 // Which Discord server the dashboard is pinned to (set by the GuildSwitcher or a
 // ?guild= link). Declared here so the edge middleware can import it without
 // pulling in next/headers via lib/guild.
 export const GUILD_COOKIE = "guildId";
-// Marks a no-login session granted by a server-scoped /dashboard link, holding
-// the guild that link is locked to. Distinct from GUILD_COOKIE so a logged-in
-// admin's normal server pin is never confused with a public guest lock.
-export const GUEST_LINK_COOKIE = "megu_guest_guild";
+// Holds the guild selected by a server-scoped dashboard link. It is only a
+// selection lock; it never authenticates the visitor.
+export const DASHBOARD_LINK_GUILD_COOKIE = "megu_dashboard_link_guild";
 export type Role = "admin" | "member";
+export const DEFAULT_DASHBOARD_ROLE: Role = "member";
 
 export interface SessionUser {
   id: string;
@@ -84,32 +83,6 @@ export function capRoleForHost(
   return user;
 }
 
-function parseIds(raw: string | undefined): Set<string> {
-  return new Set(
-    (raw ?? "")
-      .split(/[\s,]+/)
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-}
-
-/**
- * Resolve a Discord user id to a role, or null if they're not allowed in.
- * Admin wins if an id appears in both lists.
- */
-export function roleForUser(userId: string): Role | null {
-  const admins = parseIds(process.env.ADMIN_USER_IDS);
-  const members = parseIds(process.env.MEMBER_USER_IDS);
-  if (admins.has(userId)) return "admin";
-  if (members.has(userId)) return "member";
-  return null;
-}
-
-/** Alias with an explicit provider-oriented name for Supabase Auth callers. */
-export function resolveRoleForDiscordId(discordId: string): Role | null {
-  return roleForUser(discordId);
-}
-
 export interface SupabaseDiscordIdentity {
   id?: string;
   provider: string;
@@ -131,19 +104,26 @@ function firstNonEmptyString(...values: unknown[]): string | undefined {
   );
 }
 
-/** Convert a verified Supabase Discord identity into the app's role-aware user. */
-export function sessionUserFromSupabaseUser(
+export function roleFromDatabase(value: unknown): Role | null {
+  return value === "admin" || value === "member" ? value : null;
+}
+
+export interface DiscordProfile {
+  discordId: string;
+  username: string;
+  avatar: string | null;
+}
+
+/** Extract display data from a verified Supabase Discord identity. */
+export function discordProfileFromSupabaseUser(
   user: SupabaseAuthUser | null,
-): SessionUser | null {
+): DiscordProfile | null {
   if (!user) return null;
   const identity = user.identities?.find(
     (candidate) => candidate.provider === "discord",
   );
   const discordId = identity?.provider_id ?? identity?.id;
   if (!discordId) return null;
-
-  const role = resolveRoleForDiscordId(discordId);
-  if (!role) return null;
 
   const data = identity?.identity_data ?? {};
   const metadata = user.user_metadata ?? {};
@@ -166,8 +146,18 @@ export function sessionUserFromSupabaseUser(
     ) ?? "Discord user";
 
   const avatar = typeof data.avatar === "string" ? data.avatar : null;
+  return { discordId, username, avatar };
+}
 
-  return { id: discordId, username, avatar, role };
+/** Convert a verified Supabase Discord identity and database role into a user. */
+export function sessionUserFromSupabaseUser(
+  user: SupabaseAuthUser | null,
+  role: unknown = null,
+): SessionUser | null {
+  const profile = discordProfileFromSupabaseUser(user);
+  const validRole = roleFromDatabase(role);
+  if (!profile || !validRole) return null;
+  return { id: profile.discordId, username: profile.username, avatar: profile.avatar, role: validRole };
 }
 
 /**
@@ -180,69 +170,27 @@ export function devBypassUser(): SessionUser | null {
   if (process.env.NODE_ENV === "production") return null;
   const role = process.env.DEV_AUTH_BYPASS;
   if (role !== "admin" && role !== "member") return null;
-  const id =
-    parseIds(process.env.ADMIN_USER_IDS).values().next().value ?? "dev";
+  const id = `dev-${role}`;
   return { id, username: `dev-${role}`, avatar: null, role };
 }
 
 /**
- * Public guest access for remote (ngrok) visitors. When PUBLIC_GUEST_ACCESS is
- * set to "member" (or "admin"), any request arriving on a NON-local host is
- * auto-signed-in as a guest of that role with no Discord login. Local requests
- * are unaffected, so your own machine still uses normal admin auth.
- *
- * Returns null on local hosts or when the flag is unset. Note that even with
- * "admin", capRoleForHost() still caps remote guests to member.
- */
-export function guestUserForHost(
-  host: string | null | undefined,
-): SessionUser | null {
-  const role = process.env.PUBLIC_GUEST_ACCESS;
-  if (role !== "admin" && role !== "member") return null;
-  if (isLocalHost(host)) return null;
-  return { id: "guest", username: "guest", avatar: null, role };
-}
-
-/**
- * When GUEST_GUILD_ID is set, remote (ngrok) visitors are locked to that one
+ * When REMOTE_GUILD_ID is set, remote (ngrok) visitors are locked to that one
  * server — they can't view or switch to any other. Returns the forced guild id
  * for non-local requests, or null on local hosts / when unset (admins keep the
  * full server switcher).
  */
 export function forcedGuildId(host: string | null | undefined): string | null {
-  const id = process.env.GUEST_GUILD_ID;
+  const id = process.env.REMOTE_GUILD_ID;
   if (!id) return null;
   if (isLocalHost(host)) return null;
   return id;
 }
 
-/**
- * Public no-login /dashboard links are off unless DASHBOARD_PUBLIC_LINK is set
- * to "true"/"1". Until then a ?guild= link only pins the server for users who
- * are already authenticated the normal way.
- */
-export function publicLinkEnabled(): boolean {
-  const v = process.env.DASHBOARD_PUBLIC_LINK?.toLowerCase();
-  return v === "true" || v === "1";
-}
-
-/**
- * No-login guest granted by a server-scoped /dashboard link. When public links
- * are enabled and the guest-link cookie names a guild, the visitor is treated as
- * a member (Speak + Music only), locked to that one server. Returns null when
- * the feature is off or there's no link cookie.
- */
-export function linkGuestUser(
-  guildFromCookie: string | undefined | null,
-): SessionUser | null {
-  if (!publicLinkEnabled() || !guildFromCookie) return null;
-  return { id: "guest", username: "guest", avatar: null, role: "member" };
-}
-
-/** The guild a /dashboard-link guest is locked to, or null if not applicable. */
-export function linkGuestGuildId(
+/** The guild a /dashboard link is locked to, or null if not applicable. */
+export function dashboardLinkGuildId(
   guildFromCookie: string | undefined | null,
 ): string | null {
-  if (!publicLinkEnabled() || !guildFromCookie) return null;
+  if (!guildFromCookie) return null;
   return guildFromCookie;
 }

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 schema="supabase/migrations/20260826223000_initial_schema.sql"
+auth_schema="supabase/migrations/20260827090000_dashboard_users.sql"
 import="scripts/import-supabase-dump.sh"
 
 for table in GuildConfig BotRuntime VoiceEvent MusicHistory; do
@@ -11,6 +12,10 @@ grep -q 'ENABLE ROW LEVEL SECURITY' "$schema"
 grep -q 'VoiceEvent_guildId_createdAt_idx' "$schema"
 grep -q 'MusicHistory_guildId_createdAt_idx' "$schema"
 ! grep -q 'Poe2Watch' "$schema"
+grep -q 'CREATE TYPE public."DashboardRole"' "$auth_schema"
+grep -q 'CREATE TABLE public."DashboardUser"' "$auth_schema"
+grep -q 'ENABLE ROW LEVEL SECURITY' "$auth_schema"
+grep -q 'users can read their own dashboard account' "$auth_schema"
 ! "$import" 2>/dev/null
 
 fixture_dir="$(mktemp -d)"

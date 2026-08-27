@@ -45,7 +45,7 @@ and the server-only `SUPABASE_SECRET_KEY` before anything that touches the DB.
   `/music`, and `/music/state` so the dashboard can drive the bot.
 - **Database:** Supabase Postgres. `supabase/migrations/` is the source of truth,
   shared by both the bot and dashboard. Tables: `GuildConfig`, `BotRuntime`,
-  `VoiceEvent`, and `MusicHistory`.
+  `VoiceEvent`, `MusicHistory`, and the dashboard's `DashboardUser` role table.
 - **Dashboard** (`dashboard/`): a separate Next.js app and npm workspace. It
   reads Supabase through its SSR client and calls the bot's control endpoint for
   live actions. Supabase Auth provides Discord OAuth sessions.

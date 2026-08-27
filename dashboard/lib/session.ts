@@ -2,11 +2,9 @@
 import { cookies, headers } from 'next/headers';
 import { createClient } from '@/lib/supabase/server';
 import {
-  GUEST_LINK_COOKIE,
   capRoleForHost,
   devBypassUser,
-  guestUserForHost,
-  linkGuestUser,
+  roleFromDatabase,
   requestHost,
   sessionUserFromSupabaseUser,
   type Role,
@@ -17,12 +15,14 @@ export async function getSessionUser(): Promise<SessionUser | null> {
   const hdrs = await headers();
   const host = requestHost((name) => hdrs.get(name));
   const store = await cookies();
-  const { data } = await createClient(store).auth.getUser();
+  const db = createClient(store);
+  const { data } = await db.auth.getUser();
+  const roleResult = data.user
+    ? await db.from('DashboardUser').select('role').eq('id', data.user.id).maybeSingle()
+    : null;
+  if (roleResult?.error) throw new Error(`read DashboardUser: ${roleResult.error.message}`);
   const resolved =
-    devBypassUser() ??
-    sessionUserFromSupabaseUser(data.user) ??
-    guestUserForHost(host) ??
-    linkGuestUser(store.get(GUEST_LINK_COOKIE)?.value);
+    devBypassUser() ?? sessionUserFromSupabaseUser(data.user, roleFromDatabase(roleResult?.data?.role));
   return resolved ? capRoleForHost(resolved, host) : null;
 }
 

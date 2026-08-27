@@ -36,8 +36,8 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
     lockedGuildId(),
   ]);
 
-  // Visitors locked to a single server (remote/ngrok guests, or no-login
-  // /dashboard-link guests) see only that one — they can't switch away.
+  // Visitors locked to a single server (remote/ngrok users or a server-scoped
+  // dashboard link) see only that one — they can't switch away.
   const visibleGuilds = locked ? guilds.filter((g) => g.id === locked) : guilds;
 
   const avatarUrl = user.avatar

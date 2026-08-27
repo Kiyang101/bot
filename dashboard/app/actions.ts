@@ -17,14 +17,14 @@ import {
   type Effect,
 } from '@/lib/control';
 import { getSelectedGuildId, lockedGuildId, GUILD_COOKIE } from '@/lib/guild';
-import { getSessionUser, requireRole } from '@/lib/session';
+import { requireRole } from '@/lib/session';
 import { readBotRuntime } from '@/lib/runtime';
 import { forceStopProcess, processIsAlive, startManagedBot } from '@/lib/botProcess';
 import { getBotStatus, sendBotStop } from '@/lib/control';
 
 /** Switches which Discord server the dashboard is viewing (stored in a cookie). */
 export async function selectGuild(guildId: string) {
-  // Remote (ngrok) visitors and no-login link guests are locked to one server —
+  // Remote (ngrok) visitors and server-scoped dashboard links are locked to one server —
   // ignore attempts to switch away from it.
   const locked = await lockedGuildId();
   if (locked && guildId !== locked) return;
@@ -255,11 +255,8 @@ export async function fetchMusicHistory(): Promise<MusicHistoryItem[]> {
   const guildId = await getSelectedGuildId();
   if (!guildId) return [];
 
-  // Public dashboard links use a guest session rather than Supabase Auth.
-  // MusicHistory is intentionally readable only by authenticated users via
-  // RLS, so use the trusted server client for this already guild-scoped read.
-  const user = await getSessionUser();
-  const db = user?.id === 'guest' ? createAdminClient() : createClient(await cookies());
+  // MusicHistory is readable by authenticated users through RLS.
+  const db = createClient(await cookies());
 
   const rows = assertSupabaseResult(
     'read MusicHistory',

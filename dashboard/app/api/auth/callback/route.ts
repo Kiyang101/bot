@@ -1,7 +1,14 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { cookies } from 'next/headers';
 import { createClient } from '@/lib/supabase/server';
-import { GUEST_LINK_COOKIE, homePathFor, sessionUserFromSupabaseUser } from '@/lib/auth';
+import { createAdminClient } from '@/lib/supabase/admin';
+import { assertSupabaseResult } from '@/lib/database';
+import {
+  DEFAULT_DASHBOARD_ROLE,
+  discordProfileFromSupabaseUser,
+  homePathFor,
+  sessionUserFromSupabaseUser,
+} from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,13 +26,35 @@ export async function GET(req: NextRequest) {
   const { data, error } = await supabase.auth.exchangeCodeForSession(code);
   if (error || !data.user) return loginError(req, 'exchange');
 
-  const user = sessionUserFromSupabaseUser(data.user);
+  const profile = discordProfileFromSupabaseUser(data.user);
+  if (!profile) {
+    await supabase.auth.signOut();
+    return loginError(req, 'forbidden');
+  }
+
+  const dashboardUser = assertSupabaseResult(
+    'write DashboardUser',
+    // Omit role on update so an admin promotion is never reset by login.
+    await createAdminClient().from('DashboardUser').upsert(
+      {
+        id: data.user.id,
+        discordId: profile.discordId,
+        username: profile.username,
+        avatar: profile.avatar,
+        updatedAt: new Date().toISOString(),
+      },
+      { onConflict: 'id' },
+    ).select('role').single(),
+  );
+  const user = sessionUserFromSupabaseUser(
+    data.user,
+    dashboardUser?.role ?? DEFAULT_DASHBOARD_ROLE,
+  );
   if (!user) {
     await supabase.auth.signOut();
     return loginError(req, 'forbidden');
   }
 
   const response = NextResponse.redirect(new URL(homePathFor(user.role), req.url));
-  response.cookies.delete(GUEST_LINK_COOKIE);
   return response;
 }

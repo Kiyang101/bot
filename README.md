@@ -99,9 +99,10 @@ and is safe to commit.
 
 ### 4. Configure Supabase
 
-Create or open the Supabase project, then run
-`supabase/migrations/20260826223000_initial_schema.sql` in the Supabase SQL
-Editor. Add the following values to `.env`:
+Create or open the Supabase project, then run the SQL files in
+`supabase/migrations/` in filename order in the Supabase SQL Editor. This
+creates the application tables, including `DashboardUser`. Add the following
+values to `.env`:
 
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
@@ -130,8 +131,17 @@ Authentication → Providers. Copy the Supabase provider callback URL shown ther
 into the Discord application's OAuth2 redirect list. Add
 `http://localhost:3000/api/auth/callback` (and the production equivalent) to
 Supabase Dashboard → Authentication → URL Configuration → Redirect URLs. The
-dashboard still uses `ADMIN_USER_IDS` and `MEMBER_USER_IDS` to authorize Discord
-identities after Supabase authenticates them.
+dashboard creates a `DashboardUser` row after each successful Discord login.
+New users are members by default; promote an account to `admin` by updating its
+`role` in Supabase.
+
+For example, after the user has logged in once:
+
+```sql
+update public."DashboardUser"
+set role = 'admin'
+where "discordId" = 'YOUR_DISCORD_USER_ID';
+```
 
 ### 5. Invite the bot to your server
 
@@ -184,11 +194,12 @@ npm run dev                  # http://localhost:3000
 
 Set `BOT_CONTROL_SECRET` to the **same** random string in both the root `.env`
 and `dashboard/.env.local` so the dashboard can authenticate to the bot's
-control endpoint. Grant dashboard access with `ADMIN_USER_IDS` and/or
-`MEMBER_USER_IDS`; `DEV_AUTH_BYPASS=admin` is available for local development
-only and should remain blank in production. Supabase Auth handles the Discord
-OAuth exchange and session cookies; configure its provider and redirect URLs as
-described in the Supabase setup section above.
+control endpoint. Every successful login receives member access by default;
+update the corresponding `DashboardUser.role` to `admin` for full access.
+`DEV_AUTH_BYPASS=admin` is available for local development only and should
+remain blank in production. Supabase Auth handles the Discord OAuth exchange
+and session cookies; configure its provider and redirect URLs as described in
+the Supabase setup section above.
 
 Local admins can use the **Start bot** and **Stop bot**
 controls on the Voice Activity page; start uses `BOT_START_COMMAND` (default
