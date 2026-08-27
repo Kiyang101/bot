@@ -4,10 +4,12 @@ import { createClient } from '@/lib/supabase/server';
 import { assertSupabaseResult } from '@/lib/database';
 import { getSelectedGuildId } from '@/lib/guild';
 import { saveLogChannel } from '../actions';
+import { requireRole } from '@/lib/session';
 
 export const dynamic = 'force-dynamic';
 
 export default async function ConfigPage() {
+  await requireRole('admin', { allowRemoteAdmin: true });
   const guildId = await getSelectedGuildId();
 
   const [channels, configResult] = await Promise.all([
@@ -22,6 +24,7 @@ export default async function ConfigPage() {
 
   return (
     <main>
+      <a className="back-button" href="/servers">← Select server</a>
       <h1>Settings</h1>
       <p className="sub">Choose which text channel voice activity gets posted to in Discord.</p>
 

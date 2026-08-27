@@ -7,13 +7,14 @@ import {
   DEFAULT_DASHBOARD_ROLE,
   discordProfileFromSupabaseUser,
   homePathFor,
+  requestOrigin,
   sessionUserFromSupabaseUser,
 } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 function loginError(req: NextRequest, reason: string) {
-  const url = new URL('/login', req.url);
+  const url = new URL('/login', requestOrigin((name) => req.headers.get(name), req.nextUrl.origin));
   url.searchParams.set('error', reason);
   return NextResponse.redirect(url);
 }
@@ -55,6 +56,8 @@ export async function GET(req: NextRequest) {
     return loginError(req, 'forbidden');
   }
 
-  const response = NextResponse.redirect(new URL(homePathFor(user.role), req.url));
+  const response = NextResponse.redirect(
+    new URL(homePathFor(user.role), requestOrigin((name) => req.headers.get(name), req.nextUrl.origin)),
+  );
   return response;
 }

@@ -16,7 +16,6 @@ import { PassThrough, type Readable } from 'node:stream';
 import ytdlpDefault, { create as createYtdlp } from 'youtube-dl-exec';
 import ffmpegStatic from 'ffmpeg-static';
 import type { Track, Effect } from './types';
-import { parseSpotifyInput, resolveSpotify } from './spotify';
 
 /** yt-dlp callable — custom binary if YTDLP_PATH is set, else the bundled one. */
 const ytdlp = (() => {
@@ -85,10 +84,7 @@ interface RawInfo {
 export type ResolveKind =
   | 'video'
   | 'playlist'
-  | 'search'
-  | 'spotify-track'
-  | 'spotify-playlist'
-  | 'spotify-liked';
+  | 'search';
 
 function watchUrl(raw: RawInfo): string {
   // A full URL is preferred; flat playlist/search entries may only give an id.
@@ -171,9 +167,6 @@ export async function resolve(
   requestedById: string,
   requestedByTag: string,
 ): Promise<{ tracks: Track[]; kind: ResolveKind; label?: string }> {
-  const spotify = parseSpotifyInput(input);
-  if (spotify) return resolveSpotify(spotify, requestedById, requestedByTag);
-
   if (!looksLikeUrl(input)) {
     return { tracks: await search(input, requestedById, requestedByTag, 5), kind: 'search' };
   }

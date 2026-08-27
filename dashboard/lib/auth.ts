@@ -4,7 +4,7 @@
 //   • admin  — full access to every page.
 //   • member — Speak + Music pages only.
 //
-// Which Discord server the dashboard is pinned to (set by the GuildSwitcher or a
+// Which Discord server the dashboard is pinned to (set by the server selection page or a
 // ?guild= link). Declared here so the edge middleware can import it without
 // pulling in next/headers via lib/guild.
 export const GUILD_COOKIE = "guildId";
@@ -23,13 +23,13 @@ export interface SessionUser {
 
 /** Pages each role is allowed to open. Members are confined to Speak + Music. */
 export const ROLE_PATHS: Record<Role, string[]> = {
-  admin: ["/", "/speak", "/music", "/config"],
-  member: ["/speak", "/music"],
+  admin: ["/", "/servers", "/logs", "/speak", "/music", "/config"],
+  member: ["/servers", "/speak", "/music"],
 };
 
 /** Where to send a user after login / when they hit a page above their role. */
 export function homePathFor(role: Role): string {
-  return role === "admin" ? "/" : "/music";
+  return "/servers";
 }
 
 /** True if `role` may view `pathname` (ignoring query string). */
@@ -58,7 +58,37 @@ function localHosts(): string[] {
 export function requestHost(
   get: (name: string) => string | null | undefined,
 ): string | null {
-  return get("x-forwarded-host") ?? get("host") ?? null;
+  return firstHeaderValue(get("x-forwarded-host")) ?? firstHeaderValue(get("host")) ?? null;
+}
+
+function firstHeaderValue(value: string | null | undefined): string | null {
+  const first = value?.split(",", 1)[0]?.trim();
+  return first || null;
+}
+
+/**
+ * Resolve the browser-visible origin for redirects made behind a reverse proxy.
+ * Ngrok forwards the public host/protocol while Next may build req.url from the
+ * local server address (for example, http://localhost:3000).
+ */
+export function requestOrigin(
+  get: (name: string) => string | null | undefined,
+  fallbackOrigin: string,
+): string {
+  const host = requestHost(get);
+  if (!host) return fallbackOrigin;
+
+  const forwardedProto = firstHeaderValue(get("x-forwarded-proto"));
+  const forwarded = firstHeaderValue(get("forwarded"));
+  const forwardedProtoFromStandardHeader = forwarded?.match(/(?:^|;)\s*proto=([^;\s]+)/i)?.[1];
+  const fallbackProtocol = new URL(fallbackOrigin).protocol.replace(":", "");
+  const protocol =
+    forwardedProto ??
+    forwardedProtoFromStandardHeader ??
+    (host === firstHeaderValue(get("host")) ? fallbackProtocol : "https");
+
+  if (protocol !== "http" && protocol !== "https") return fallbackOrigin;
+  return `${protocol}://${host}`;
 }
 
 /** True when the request came in on a trusted local host. */

@@ -110,7 +110,7 @@ export async function stopBot(): Promise<BotActionState> {
 
 /** Saves (or clears) the voice-log channel for the selected server. */
 export async function saveLogChannel(formData: FormData) {
-  await requireRole('admin');
+  await requireRole('admin', { allowRemoteAdmin: true });
   const guildId = await getSelectedGuildId();
   if (!guildId) return;
 
@@ -299,12 +299,12 @@ export async function fetchMusicState(): Promise<MusicState | null> {
   }
 }
 
-/** Queue a song, playlist, Spotify link, or Spotify liked-song import. */
+/** Queue a song or YouTube playlist. */
 export async function playMusic(channelId: string, query: string): Promise<MusicActionState> {
   const guildId = await getSelectedGuildId();
   if (!guildId) return { ok: false, message: 'No server selected.' };
   if (!channelId) return { ok: false, message: 'Pick a voice channel first.' };
-  if (!query.trim()) return { ok: false, message: 'Enter a song name, YouTube/Spotify URL, or liked.' };
+  if (!query.trim()) return { ok: false, message: 'Enter a song name or YouTube URL.' };
 
   try {
     const res = await sendMusicCommand({ guildId, action: 'play', channelId, query: query.trim() });
@@ -312,8 +312,8 @@ export async function playMusic(channelId: string, query: string): Promise<Music
     const added = (res.added as number) ?? 0;
     const startedNow = res.startedNow as boolean;
     const msg =
-      ['playlist', 'spotify-playlist', 'spotify-liked'].includes(String(res.kind))
-        ? `📋 Queued ${added} track(s) from ${String(res.kind) === 'spotify-liked' ? 'Spotify Liked Songs' : 'the playlist'}.`
+      String(res.kind) === 'playlist'
+        ? `📋 Queued ${added} track(s) from the playlist.`
         : startedNow
           ? `▶️ Playing “${title}”.`
           : `➕ Queued “${title}”.`;

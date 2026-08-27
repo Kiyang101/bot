@@ -248,7 +248,7 @@ export default function MusicPlayer({
           </select>
           <input
             type="text"
-            placeholder="Song, YouTube/Spotify URL, or liked"
+            placeholder="Song, YouTube URL, or playlist"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             maxLength={500}

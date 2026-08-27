@@ -11,7 +11,12 @@ import {
   type SessionUser,
 } from '@/lib/auth';
 
-export async function getSessionUser(): Promise<SessionUser | null> {
+export interface SessionOptions {
+  /** Allow a real admin to use admin-only remote routes such as /config. */
+  allowRemoteAdmin?: boolean;
+}
+
+export async function getSessionUser(options: SessionOptions = {}): Promise<SessionUser | null> {
   const hdrs = await headers();
   const host = requestHost((name) => hdrs.get(name));
   const store = await cookies();
@@ -23,11 +28,15 @@ export async function getSessionUser(): Promise<SessionUser | null> {
   if (roleResult?.error) throw new Error(`read DashboardUser: ${roleResult.error.message}`);
   const resolved =
     devBypassUser() ?? sessionUserFromSupabaseUser(data.user, roleFromDatabase(roleResult?.data?.role));
-  return resolved ? capRoleForHost(resolved, host) : null;
+  return resolved
+    ? options.allowRemoteAdmin
+      ? resolved
+      : capRoleForHost(resolved, host)
+    : null;
 }
 
-export async function requireRole(role: Role): Promise<SessionUser> {
-  const user = await getSessionUser();
+export async function requireRole(role: Role, options: SessionOptions = {}): Promise<SessionUser> {
+  const user = await getSessionUser(options);
   if (!user) throw new Error('Not authenticated.');
   if (role === 'admin' && user.role !== 'admin') throw new Error('Admins only.');
   return user;

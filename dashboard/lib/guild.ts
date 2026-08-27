@@ -1,5 +1,5 @@
 // Resolves which Discord server the dashboard is currently viewing.
-// Normally the selection is stored in a cookie (set by the GuildSwitcher), and
+// Normally the selection is stored in a cookie (set by the server selection page), and
 // falls back to the GUILD_ID env var so single-server setups keep working.
 // Remote (ngrok) visitors are instead locked to REMOTE_GUILD_ID when it's set.
 import { cookies, headers } from 'next/headers';

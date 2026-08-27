@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_DASHBOARD_ROLE,
+  requestOrigin,
   sessionUserFromSupabaseUser,
 } from '../dashboard/lib/auth';
 
@@ -54,4 +55,26 @@ test('uses the Discord display name stored in Supabase user metadata', () => {
     'member',
   );
   assert.equal(user?.username, 'kiyang#0');
+});
+
+test('uses the forwarded ngrok origin for redirects', () => {
+  const headers: Record<string, string> = {
+    host: 'localhost:3000',
+    'x-forwarded-host': 'example.ngrok-free.dev',
+    'x-forwarded-proto': 'https',
+  };
+
+  assert.equal(
+    requestOrigin((name) => headers[name] ?? null, 'http://localhost:3000'),
+    'https://example.ngrok-free.dev',
+  );
+});
+
+test('keeps direct local redirects on the local origin', () => {
+  const headers: Record<string, string> = { host: 'localhost:3000' };
+
+  assert.equal(
+    requestOrigin((name) => headers[name] ?? null, 'http://localhost:3000'),
+    'http://localhost:3000',
+  );
 });

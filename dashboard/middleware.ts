@@ -8,6 +8,7 @@ import {
   devBypassUser,
   homePathFor,
   roleFromDatabase,
+  requestOrigin,
   requestHost,
   sessionUserFromSupabaseUser,
 } from '@/lib/auth';
@@ -24,6 +25,7 @@ function redirectWithSession(url: URL, source: NextResponse): NextResponse {
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
+  const origin = requestOrigin((name) => req.headers.get(name), req.nextUrl.origin);
   const host = requestHost((name) => req.headers.get(name));
   const { response: supabaseResponse, supabase, user: authUser } = await updateSession(req);
   const roleResult = authUser
@@ -39,7 +41,7 @@ export async function middleware(req: NextRequest) {
 
   const guildParam = req.nextUrl.searchParams.get('guild');
   if (guildParam) {
-    const url = new URL(req.nextUrl);
+    const url = new URL(req.nextUrl.pathname + req.nextUrl.search, origin);
     url.searchParams.delete('guild');
     const response = redirectWithSession(url, supabaseResponse);
     response.cookies.set(GUILD_COOKIE, guildParam, { path: '/', sameSite: 'lax', maxAge: YEAR });
@@ -54,12 +56,14 @@ export async function middleware(req: NextRequest) {
 
   const resolved = realSession;
   if (!resolved) {
-    return redirectWithSession(new URL('/login', req.url), supabaseResponse);
+    return redirectWithSession(new URL('/login', origin), supabaseResponse);
   }
 
   const user = capRoleForHost(resolved, host);
-  if (!canAccess(user.role, pathname)) {
-    return redirectWithSession(new URL(homePathFor(user.role), req.url), supabaseResponse);
+  const isRemoteAdminConfig =
+    resolved?.role === 'admin' && (pathname === '/config' || pathname.startsWith('/config/'));
+  if (!isRemoteAdminConfig && !canAccess(user.role, pathname)) {
+    return redirectWithSession(new URL(homePathFor(user.role), origin), supabaseResponse);
   }
 
   return supabaseResponse;

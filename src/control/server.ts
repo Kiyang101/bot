@@ -193,8 +193,8 @@ async function handleMusic(client: Client, body: MusicBody): Promise<Record<stri
 
     const { tracks, kind } = await resolveTracks(query, 'dashboard', 'Dashboard');
     if (tracks.length === 0) throw new Error('No results found for that query.');
-    // A free-text search enqueues just the top hit; URLs/playlists/Spotify
-    // imports enqueue all resolved tracks.
+    // A free-text search enqueues just the top hit; URLs/playlists enqueue all
+    // resolved tracks.
     const chosen = kind === 'search' ? [tracks[0]] : tracks;
 
     const session = musicManager.getOrCreate(guildId);

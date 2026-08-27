@@ -26,7 +26,7 @@ async function discordFetch<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/** Lists every server the bot is a member of (for the server switcher). */
+/** Lists every server the bot is a member of (for the server selection page). */
 export async function listGuilds(): Promise<Guild[]> {
   const guilds = await discordFetch<Array<{ id: string; name: string; icon: string | null }>>(
     `/users/@me/guilds`,

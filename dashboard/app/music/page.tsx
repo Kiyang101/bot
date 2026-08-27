@@ -56,10 +56,10 @@ export default async function MusicPage() {
 
   return (
     <main className="music-page">
+      <a className="back-button" href="/servers">← Select server</a>
       <h1>Music</h1>
       <p className="sub">
-        Play YouTube audio or Spotify links in a voice channel and control the
-        queue live.
+        Play YouTube audio in a voice channel and control the queue live.
       </p>
 
       <MusicPlayer
@@ -72,7 +72,7 @@ export default async function MusicPage() {
       <p className="hint">
         {channels.length === 0
           ? "No voice channels found — check the bot token / that the bot is in the server."
-          : "The bot joins the channel you pick. Search by name, paste a YouTube/Spotify URL, or enter liked for Spotify Liked Songs."}
+          : "The bot joins the channel you pick. Search by name or paste a YouTube URL."}
       </p>
     </main>
   );

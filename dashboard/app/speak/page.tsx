@@ -14,6 +14,7 @@ export default async function SpeakPage() {
 
   return (
     <main>
+      <a className="back-button" href="/servers">← Select server</a>
       <h1>Speak</h1>
       <p className="sub">Type a message and the bot will say it out loud in a voice channel.</p>
 
