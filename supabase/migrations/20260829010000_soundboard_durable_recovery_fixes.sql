@@ -148,8 +148,7 @@ GRANT ALL ON public."SoundUploadRecovery" TO service_role;
 CREATE INDEX IF NOT EXISTS "SoundUploadRecovery_due_idx"
   ON public."SoundUploadRecovery" (state, "nextAttemptAt", "createdAt");
 
-DROP FUNCTION IF EXISTS public.prepare_sound_upload_recovery(uuid, text, text, text);
-CREATE OR REPLACE FUNCTION public.prepare_sound_upload_recovery(
+CREATE OR REPLACE FUNCTION public.prepare_sound_upload_recovery_tokenized(
   p_sound_id uuid,
   p_uploaded_by_id text,
   p_source_path text,
@@ -203,8 +202,7 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.mark_sound_upload_recovery_pending(uuid, text);
-CREATE OR REPLACE FUNCTION public.mark_sound_upload_recovery_pending(
+CREATE OR REPLACE FUNCTION public.mark_sound_upload_recovery_pending_tokenized(
   p_sound_id uuid,
   p_token uuid,
   p_last_error text
@@ -296,8 +294,7 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.complete_sound_upload_recovery(uuid);
-CREATE OR REPLACE FUNCTION public.complete_sound_upload_recovery(
+CREATE OR REPLACE FUNCTION public.complete_sound_upload_recovery_tokenized(
   p_sound_id uuid,
   p_token uuid,
   p_source_path text,
@@ -378,18 +375,95 @@ BEGIN
 END;
 $$;
 
+-- Keep the pre-token rollout contracts available. These wrappers deliberately
+-- prove only the state/path facts available to their old callers.
+CREATE OR REPLACE FUNCTION public.prepare_sound_upload_recovery(
+  p_sound_id uuid,
+  p_uploaded_by_id text,
+  p_source_path text,
+  p_playable_path text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  IF p_uploaded_by_id IS NULL OR p_uploaded_by_id = '' OR p_uploaded_by_id ~ '[/\\\\]'
+     OR p_source_path <> 'sounds/' || p_uploaded_by_id || '/' || p_sound_id::text || '/source'
+     OR p_playable_path !~ ('^sounds/' || p_uploaded_by_id || '/' || p_sound_id::text || '/playable-[^/]+$') THEN
+    RETURN false;
+  END IF;
+
+  INSERT INTO public."SoundUploadRecovery" (
+    "soundId", "uploadedById", "sourceStoragePath", "playableStoragePath", state
+  ) VALUES (
+    p_sound_id, p_uploaded_by_id, p_source_path, p_playable_path, 'uploading'
+  );
+  RETURN true;
+EXCEPTION WHEN unique_violation THEN
+  RETURN false;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.mark_sound_upload_recovery_pending(
+  p_sound_id uuid,
+  p_last_error text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE public."SoundUploadRecovery"
+  SET state = 'cleanup_pending',
+      "lastError" = p_last_error,
+      "claimToken" = NULL,
+      "claimExpiresAt" = NULL,
+      "updatedAt" = CURRENT_TIMESTAMP
+  WHERE "soundId" = p_sound_id
+    AND state = 'uploading'
+    AND "leaseExpiresAt" > CURRENT_TIMESTAMP;
+  RETURN FOUND;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.complete_sound_upload_recovery(
+  p_sound_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  DELETE FROM public."SoundUploadRecovery" AS recovery
+  USING public."Sound" AS sound
+  WHERE recovery."soundId" = p_sound_id
+    AND recovery.state IN ('uploading', 'cleanup_pending')
+    AND sound.id = recovery."soundId"
+    AND sound."sourceStoragePath" = recovery."sourceStoragePath"
+    AND sound."storagePath" = recovery."playableStoragePath";
+  RETURN FOUND;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.prepare_sound_upload_recovery(uuid, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.heartbeat_sound_upload_recovery(uuid, uuid, integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.mark_sound_upload_recovery_pending(uuid, uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.prepare_sound_upload_recovery_tokenized(uuid, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.mark_sound_upload_recovery_pending(uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.mark_sound_upload_recovery_pending_tokenized(uuid, uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.claim_sound_upload_recovery(uuid, uuid, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.defer_sound_upload_recovery(uuid, uuid, text, integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.complete_sound_upload_recovery(uuid, uuid, text, text, text, boolean, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.complete_sound_upload_recovery_tokenized(uuid, uuid, text, text, text, boolean, boolean) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.complete_sound_upload_recovery(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.prepare_sound_upload_recovery(uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.heartbeat_sound_upload_recovery(uuid, uuid, integer) TO service_role;
-GRANT EXECUTE ON FUNCTION public.mark_sound_upload_recovery_pending(uuid, uuid, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.prepare_sound_upload_recovery_tokenized(uuid, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.mark_sound_upload_recovery_pending(uuid, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.mark_sound_upload_recovery_pending_tokenized(uuid, uuid, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_sound_upload_recovery(uuid, uuid, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.defer_sound_upload_recovery(uuid, uuid, text, integer) TO service_role;
-GRANT EXECUTE ON FUNCTION public.complete_sound_upload_recovery(uuid, uuid, text, text, text, boolean, boolean) TO service_role;
+GRANT EXECUTE ON FUNCTION public.complete_sound_upload_recovery_tokenized(uuid, uuid, text, text, text, boolean, boolean) TO service_role;
+GRANT EXECUTE ON FUNCTION public.complete_sound_upload_recovery(uuid) TO service_role;
 
 DROP INDEX IF EXISTS "SoundMutationRecovery_active_sound_key";
 CREATE UNIQUE INDEX "SoundMutationRecovery_active_sound_key"
