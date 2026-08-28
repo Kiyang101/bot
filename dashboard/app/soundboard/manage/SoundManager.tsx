@@ -63,6 +63,16 @@ interface EditorMetadata {
   fadeOutMs: number;
 }
 
+const DEFAULT_EDITOR_METADATA: EditorMetadata = {
+  name: '',
+  category: DEFAULT_CATEGORIES[0],
+  color: COLOR_OPTIONS[0],
+  shortcut: '',
+  gainDb: 0,
+  fadeInMs: 0,
+  fadeOutMs: 0,
+};
+
 type FocusAfterDelete = string | 'upload';
 
 interface SoundLibraryState {
@@ -103,17 +113,22 @@ function metadataForSound(sound: SoundboardSound): EditorMetadata {
     name: sound.name,
     category: sound.category,
     color: sound.color,
-    shortcut: sound.shortcut ?? '',
+    shortcut: sound.shortcut === 'space' ? ' ' : sound.shortcut ?? '',
     gainDb: sound.gainDb,
     fadeInMs: sound.fadeInMs,
     fadeOutMs: sound.fadeOutMs,
   };
 }
 
+function displayShortcut(shortcut: string | null): string {
+  return shortcut === null ? '—' : shortcut === 'space' ? 'Space' : shortcut.toUpperCase();
+}
+
 function metadataInput(metadata: EditorMetadata): SoundMetadataInput {
   return {
     ...metadata,
-    shortcut: metadata.shortcut.trim() || null,
+    // A literal space must reach the server so it can normalize the Space key.
+    shortcut: metadata.shortcut === '' ? null : metadata.shortcut,
     fadeInMs: Math.round(metadata.fadeInMs),
     fadeOutMs: Math.round(metadata.fadeOutMs),
   };
@@ -287,9 +302,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
     focusAfterDeleteId: null,
   });
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [uploadMetadata, setUploadMetadata] = useState<EditorMetadata>({
-    name: '', category: DEFAULT_CATEGORIES[0], color: COLOR_OPTIONS[0], shortcut: '', gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
-  });
+  const [uploadMetadata, setUploadMetadata] = useState<EditorMetadata>(DEFAULT_EDITOR_METADATA);
   const [uploadRange, setUploadRange] = useState<TrimRange | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editMetadata, setEditMetadata] = useState<EditorMetadata | null>(null);
@@ -447,6 +460,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       setError(result.message);
       return;
     }
+    const uploadedName = uploadMetadata.name;
     const uploaded = resultValue(result);
     if (uploaded) {
       updateSounds((current) => [...current, {
@@ -454,21 +468,30 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
         previewUrl: '',
         sourcePreviewUrl: null,
       }]);
-      const previewResult = await actions.getSoundPlayableUrl(uploaded.id);
-      const previewUrl = resultValue(previewResult);
-      if (previewUrl) {
-        updateSounds((current) => current.map((sound) => sound.id === uploaded.id ? { ...sound, previewUrl } : sound));
-      } else if (!previewResult.ok) {
-        setError(previewResult.message);
-      } else {
+    }
+
+    // Reset immediately after the mutation commits so a preview outage cannot make the upload retryable.
+    setAnnouncement(`${uploadedName} uploaded.`);
+    setSelectedFile(null);
+    setUploadRange(null);
+    setUploadMetadata(DEFAULT_EDITOR_METADATA);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+
+    if (uploaded) {
+      try {
+        const previewResult = await actions.getSoundPlayableUrl(uploaded.id);
+        const previewUrl = resultValue(previewResult);
+        if (previewUrl) {
+          updateSounds((current) => current.map((sound) => sound.id === uploaded.id ? { ...sound, previewUrl } : sound));
+        } else if (!previewResult.ok) {
+          setError(previewResult.message);
+        } else {
+          setError('Could not load the sound preview. Use Refresh preview to try again.');
+        }
+      } catch {
         setError('Could not load the sound preview. Use Refresh preview to try again.');
       }
     }
-    setAnnouncement(`${uploadMetadata.name} uploaded.`);
-    setSelectedFile(null);
-    setUploadRange(null);
-    setUploadMetadata((current) => ({ ...current, name: '', shortcut: '' }));
-    if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
   async function beginEditing(sound: ManagedSound) {
@@ -736,7 +759,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
                     <div><dt>Category</dt><dd>{sound.category}</dd></div>
                     <div><dt>Duration</dt><dd>{displayDuration(sound.durationSec)}</dd></div>
                     <div><dt>Uploaded</dt><dd>{displayDate(sound.createdAt)}</dd></div>
-                    <div><dt>Shortcut</dt><dd>{sound.shortcut ? sound.shortcut.toUpperCase() : '—'}</dd></div>
+                    <div><dt>Shortcut</dt><dd>{displayShortcut(sound.shortcut)}</dd></div>
                   </dl>
                   {sound.previewUrl ? <audio
                       className="sound-row-preview"

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { BotStatus, MusicState } from '@/lib/control';
 import { SOUND_CATEGORIES } from '@/lib/sound-validation';
 import type { SoundboardActionResult, SoundboardSound } from './actions';
@@ -71,6 +71,7 @@ export default function Soundboard({
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewRefreshing, setPreviewRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const previewRequestRef = useRef<{ soundId: string; token: number }>({ soundId: '', token: 0 });
 
   const categories = useMemo(() => categoryList(sounds), [sounds]);
   const filteredSounds = useMemo(() => {
@@ -161,12 +162,16 @@ export default function Soundboard({
   }, [activeSoundId, botStatus, channelId, pendingSoundId, selectedGuildId, sounds]);
 
   async function handlePreview(sound: SoundboardSound): Promise<void> {
+    const request = { soundId: sound.id, token: previewRequestRef.current.token + 1 };
+    previewRequestRef.current = request;
     setPreviewSoundId(sound.id);
     setPreviewUrl(null);
     setPreviewError(null);
+    setPreviewRefreshing(false);
     setMessage(null);
     try {
       const result = await actions.getSoundPlayableUrl(sound.id);
+      if (previewRequestRef.current !== request) return;
       if (!result.ok) {
         setPreviewError(result.message);
         setPreviewSoundId(null);
@@ -179,6 +184,7 @@ export default function Soundboard({
       }
       setPreviewUrl(result.value);
     } catch {
+      if (previewRequestRef.current !== request) return;
       setPreviewError('Could not load the preview. Try again.');
       setPreviewSoundId(null);
     }
@@ -186,21 +192,26 @@ export default function Soundboard({
 
   async function refreshPreview(): Promise<void> {
     if (!previewSoundId || previewRefreshing) return;
-    const sound = sounds.find((candidate) => candidate.id === previewSoundId);
+    const soundId = previewSoundId;
+    const sound = sounds.find((candidate) => candidate.id === soundId);
     if (!sound) return;
+    const request = { soundId, token: previewRequestRef.current.token + 1 };
+    previewRequestRef.current = request;
     setPreviewRefreshing(true);
     setPreviewError(null);
     try {
       const result = await actions.getSoundPlayableUrl(sound.id);
+      if (previewRequestRef.current !== request) return;
       if (!result.ok || !result.value || result.value === previewUrl) {
         setPreviewError(result.ok ? 'Could not refresh the sound preview. Try again.' : result.message);
         return;
       }
       setPreviewUrl(result.value);
     } catch {
+      if (previewRequestRef.current !== request) return;
       setPreviewError('Could not refresh the sound preview. Try again.');
     } finally {
-      setPreviewRefreshing(false);
+      if (previewRequestRef.current === request) setPreviewRefreshing(false);
     }
   }
 

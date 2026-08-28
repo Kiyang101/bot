@@ -173,6 +173,29 @@ describe('Soundboard', () => {
     expect(screen.getAllByLabelText('Preview Launch horn').find((element) => element.tagName === 'AUDIO')).toHaveAttribute('src', 'https://signed.example/refreshed');
   });
 
+  test('does not install a late preview response after selecting another sound', async () => {
+    const previewResolvers = new Map<string, (result: SoundboardActionResult<string>) => void>();
+    const actions = successfulActions({
+      getSoundPlayableUrl: vi.fn((soundId): Promise<SoundboardActionResult<string>> => new Promise((resolve) => {
+        previewResolvers.set(soundId, resolve);
+      })),
+    });
+    const user = userEvent.setup();
+    renderBoard({ actions });
+
+    await user.click(screen.getByRole('button', { name: 'Preview Launch horn' }));
+    await user.click(screen.getByRole('button', { name: 'Preview Airhorn' }));
+    previewResolvers.get(launchHorn.id)?.({ ok: true, value: 'https://signed.example/launch-late' });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryAllByLabelText('Preview Launch horn').some((element) => element.tagName === 'AUDIO')).toBe(false);
+    expect(screen.queryAllByLabelText('Preview Airhorn').some((element) => element.tagName === 'AUDIO')).toBe(false);
+
+    previewResolvers.get(airhorn.id)?.({ ok: true, value: 'https://signed.example/airhorn' });
+    await waitFor(() => expect(screen.queryAllByLabelText('Preview Airhorn').find((element) => element.tagName === 'AUDIO')).toHaveAttribute('src', 'https://signed.example/airhorn'));
+    expect(screen.queryAllByLabelText('Preview Launch horn').some((element) => element.tagName === 'AUDIO')).toBe(false);
+  });
+
   test('uses native button keyboard activation for a pad', async () => {
     const user = userEvent.setup();
     const actions = successfulActions();

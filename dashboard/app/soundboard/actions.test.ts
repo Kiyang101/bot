@@ -594,6 +594,29 @@ test('duplicate shortcuts are rejected before mutation and identify the conflict
   assert.equal(updated, false);
 });
 
+test('normalizes a literal space shortcut to the server-supported Space token', async () => {
+  let updateInput: { shortcut?: string | null } = {};
+  const actions = createSoundboardActions(createDependencies({
+    updateSound: async (_id, input) => {
+      updateInput = input;
+      return { ...ownSound, ...input };
+    },
+  }));
+
+  const result = await actions.updateSound(ownSound.id, {
+    name: ownSound.name,
+    category: ownSound.category,
+    color: ownSound.color,
+    shortcut: ' ',
+    gainDb: 0,
+    fadeInMs: 0,
+    fadeOutMs: 0,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(updateInput.shortcut, 'space');
+});
+
 test('members cannot submit custom categories or non-preset colors directly', async () => {
   let updated = false;
   const actions = createSoundboardActions(createDependencies({

@@ -171,6 +171,7 @@ describe('SoundManager', () => {
     const user = userEvent.setup();
     render(<SoundManager initialSounds={[]} currentUser={{ id: 'user-1', role: 'member' }} actions={actions} />);
     await user.upload(screen.getByLabelText('Choose MP3, WAV, or OGG file'), new File([new Uint8Array(32)], 'launch.wav', { type: 'audio/wav' }));
+    await screen.findByLabelText('Audio waveform');
     fireEvent.click((await screen.findAllByRole('button', { name: 'Upload sound' })).at(-1)!);
 
     await waitFor(() => expect(actions.uploadSound).toHaveBeenCalledOnce());
@@ -178,6 +179,44 @@ describe('SoundManager', () => {
     expect(screen.queryByText('launch.wav')).not.toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('Preview service unavailable.');
     expect(screen.getByRole('button', { name: 'Refresh preview for Launch horn' })).toBeInTheDocument();
+  });
+
+  test('resets a committed upload when preview URL retrieval rejects and keeps it refreshable', async () => {
+    const actions = successfulActions({
+      getSoundPlayableUrl: vi.fn()
+        .mockRejectedValueOnce(new Error('Preview service unavailable.'))
+        .mockResolvedValueOnce({ ok: true as const, value: 'https://signed.example/recovered-playable' }),
+    });
+    const user = userEvent.setup();
+    render(<SoundManager initialSounds={[]} currentUser={{ id: 'user-1', role: 'member' }} actions={actions} />);
+    await user.upload(screen.getByLabelText('Choose MP3, WAV, or OGG file'), new File([new Uint8Array(32)], 'launch.wav', { type: 'audio/wav' }));
+    await screen.findByLabelText('Audio waveform');
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Upload sound' })).at(-1)!);
+
+    await waitFor(() => expect(actions.uploadSound).toHaveBeenCalledOnce());
+    expect(screen.getByTestId('sound-row-sound-own')).toBeInTheDocument();
+    expect(screen.queryByText('launch.wav')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Keyboard shortcut')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Use Refresh preview to try again.');
+
+    await user.click(screen.getByRole('button', { name: 'Refresh preview for Launch horn' }));
+    await waitFor(() => expect(screen.getByLabelText('Preview Launch horn')).toHaveAttribute('src', 'https://signed.example/recovered-playable'));
+    expect(actions.uploadSound).toHaveBeenCalledOnce();
+    expect(actions.getSoundPlayableUrl).toHaveBeenCalledTimes(2);
+  });
+
+  test('passes a literal space shortcut through the metadata input', async () => {
+    const actions = successfulActions();
+    const persistedSpaceSound = { ...ownSound, shortcut: 'space' };
+    render(<SoundManager initialSounds={[persistedSpaceSound]} currentUser={{ id: 'user-1', role: 'member' }} actions={actions} />);
+    expect(screen.getByText('Space')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Launch horn' }));
+    await screen.findByLabelText('Audio waveform');
+
+    expect(screen.getByRole('textbox', { name: /Keyboard shortcut/ })).toHaveValue(' ');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => expect(actions.updateSound).toHaveBeenCalledWith('sound-own', expect.objectContaining({ shortcut: ' ' })));
   });
 
   test('refreshes an expired playable URL from the edit preview', async () => {
