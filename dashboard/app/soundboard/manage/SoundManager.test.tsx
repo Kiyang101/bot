@@ -199,7 +199,7 @@ describe('SoundManager', () => {
     expect(screen.queryByLabelText('Keyboard shortcut')).not.toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('Use Refresh preview to try again.');
 
-    await user.click(screen.getByRole('button', { name: 'Refresh preview for Launch horn' }));
+    await user.click(within(screen.getByTestId('sound-row-sound-own')).getByRole('button', { name: 'Refresh preview for Launch horn' }));
     await waitFor(() => expect(screen.getByLabelText('Preview Launch horn')).toHaveAttribute('src', 'https://signed.example/recovered-playable'));
     expect(actions.uploadSound).toHaveBeenCalledOnce();
     expect(actions.getSoundPlayableUrl).toHaveBeenCalledTimes(2);
@@ -388,6 +388,29 @@ describe('SoundManager', () => {
     expect(screen.getByText('2.00 s')).toBeInTheDocument();
     expect(within(screen.getByTestId('sound-row-sound-own')).getByLabelText('Preview Launch horn')).toHaveAttribute('src', ownSound.previewUrl);
     expect(screen.getByRole('button', { name: 'Save trim' })).toBeEnabled();
+  });
+
+  test('keeps committed trim metadata and offers retry when the post-trim preview refresh rejects', async () => {
+    const updated = { ...ownSound, durationSec: 1.2, trimStartMs: 400, trimEndMs: 1600 };
+    const actions = successfulActions({
+      trimSound: vi.fn(async () => ({ ok: true as const, value: updated as SoundboardSound })),
+      getSoundPlayableUrl: vi.fn()
+        .mockRejectedValueOnce(new Error('Preview service unavailable.'))
+        .mockResolvedValueOnce({ ok: true as const, value: 'https://signed.example/refreshed-after-trim' }),
+    });
+    const user = userEvent.setup();
+    render(<SoundManager initialSounds={[ownSound]} currentUser={{ id: 'user-1', role: 'member' }} actions={actions} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Launch horn' }));
+    await screen.findByLabelText('Audio waveform');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save trim' }));
+
+    await waitFor(() => expect(screen.getByTestId('sound-row-sound-own')).toHaveTextContent('1.20 s'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not refresh the sound preview. Try again.');
+    expect(within(screen.getByTestId('sound-row-sound-own')).getByRole('button', { name: 'Refresh preview for Launch horn' })).toBeInTheDocument();
+
+    await user.click(within(screen.getByTestId('sound-row-sound-own')).getByRole('button', { name: 'Refresh preview for Launch horn' }));
+    await waitFor(() => expect(within(screen.getByTestId('sound-row-sound-own')).getByLabelText('Preview Launch horn')).toHaveAttribute('src', 'https://signed.example/refreshed-after-trim'));
   });
 
   test('tracks overlapping metadata and trim requests independently', async () => {

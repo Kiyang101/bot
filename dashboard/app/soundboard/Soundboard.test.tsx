@@ -113,6 +113,22 @@ describe('Soundboard', () => {
     expect(screen.getByText('Playing.')).toBeInTheDocument();
   });
 
+  test('visually disables every pad while a play request is pending', async () => {
+    let resolvePlay!: (result: SoundboardActionResult<SoundboardSound>) => void;
+    const actions = successfulActions({
+      playSound: vi.fn(() => new Promise<SoundboardActionResult<SoundboardSound>>((resolve) => {
+        resolvePlay = resolve;
+      })),
+    });
+    const user = userEvent.setup();
+    renderBoard({ actions });
+
+    await user.click(screen.getByRole('button', { name: /^Play Launch horn/ }));
+    expect(screen.getByRole('button', { name: /^Play Launch horn/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^Play Airhorn/ })).toBeDisabled();
+    resolvePlay({ ok: true, value: launchHorn });
+  });
+
   test('keeps the active pad and announces a busy response', async () => {
     const user = userEvent.setup();
     const actions = successfulActions({
@@ -139,6 +155,18 @@ describe('Soundboard', () => {
 
     expect(actions.stopSound).toHaveBeenCalledWith('channel-1');
     expect(screen.getByText('No sound playing')).toBeInTheDocument();
+  });
+
+  test('stop sound remains available after reload with no local active sound', async () => {
+    const user = userEvent.setup();
+    const actions = successfulActions();
+    renderBoard({ actions });
+
+    expect(screen.getByRole('button', { name: 'Stop sound' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Stop sound' }));
+
+    expect(actions.stopSound).toHaveBeenCalledWith('channel-1');
+    expect(screen.getByText('Sound stopped.')).toBeInTheDocument();
   });
 
   test('allows preview without a selected guild but disables Discord playback', async () => {

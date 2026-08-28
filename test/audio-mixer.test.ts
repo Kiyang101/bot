@@ -475,6 +475,18 @@ test('requires a same-guild voice channel before stopping the active soundboard 
   assert.equal(getCalls, 1);
 });
 
+test('stop is safe after reload when no in-memory soundboard session exists', async () => {
+  const sessions: SoundboardSessions = {
+    get: () => null,
+    getOrCreate: () => { throw new Error('stop must not create a session'); },
+  };
+
+  assert.deepEqual(
+    await handleSoundboard(clientFor(), { guildId: 'guild-1', channelId: 'voice-1' }, 'stop', sessions),
+    { ok: true },
+  );
+});
+
 test('maps an occupied overlay to the typed busy response and keeps unexpected errors internal', () => {
   assert.deepEqual(soundboardErrorResponse(new SoundboardBusyError()), {
     status: 409,

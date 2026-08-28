@@ -398,16 +398,19 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       const result = await actions.getSoundPlayableUrl(soundId);
       if (!result.ok) {
         setError(result.message);
+        updateSounds((current) => current.map((sound) => sound.id === soundId ? { ...sound, previewUrl: '' } : sound));
         return;
       }
       const previewUrl = resultValue(result);
       if (!previewUrl || previewUrl === expiredUrl) {
         setError('Could not refresh the sound preview. Try again.');
+        updateSounds((current) => current.map((sound) => sound.id === soundId ? { ...sound, previewUrl: '' } : sound));
         return;
       }
       updateSounds((current) => current.map((sound) => sound.id === soundId ? { ...sound, previewUrl } : sound));
     } catch {
       setError('Could not refresh the sound preview. Try again.');
+      updateSounds((current) => current.map((sound) => sound.id === soundId ? { ...sound, previewUrl: '' } : sound));
     } finally {
       refreshingPreviewIdsRef.current.delete(soundId);
     }
@@ -559,12 +562,22 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
     }
     const updated = resultValue(result);
     if (updated) {
-      const previewResult = await actions.getSoundPlayableUrl(updated.id);
-      const previewUrl = resultValue(previewResult);
+      const previousPreviewUrl = editingSound.previewUrl;
+      // The trim is already committed. Update metadata before the signed URL
+      // refresh so an expired/rejected preview cannot roll it back or reject
+      // the event handler outside runAction.
       updateSounds((current) => current.map((sound) => sound.id === updated.id
-        ? { ...mergeSound(sound, updated), previewUrl: previewUrl ?? sound.previewUrl }
+        ? mergeSound(sound, updated)
         : sound));
-      if (!previewResult.ok) setError(previewResult.message);
+      setEditRange((current) => current
+        ? {
+          ...current,
+          startMs: updated.trimStartMs,
+          endMs: updated.trimEndMs,
+          durationMs: Math.round((updated.durationSec ?? current.durationMs / 1_000) * 1_000),
+        }
+        : current);
+      await refreshPlayableUrl(updated.id, previousPreviewUrl);
     }
     setAnnouncement(`${editingSound.name} trim saved.`);
   }
@@ -704,13 +717,18 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
               <button type="button" onClick={() => void saveTrim()} disabled={!editingSourceUrl || !editRange || isPending(`trim:${editingSound.id}`)}>
                 {isPending(`trim:${editingSound.id}`) ? 'Processing trim…' : 'Save trim'}
               </button>
-              <audio
-                className="sound-native-preview"
-                controls
-                src={editingSound.previewUrl}
-                aria-label={`Preview ${editingSound.name}`}
-                onError={() => void refreshPlayableUrl(editingSound.id, editingSound.previewUrl)}
-              />
+              {editingSound.previewUrl ? <audio
+                  className="sound-native-preview"
+                  controls
+                  src={editingSound.previewUrl}
+                  aria-label={`Preview ${editingSound.name}`}
+                  onError={() => void refreshPlayableUrl(editingSound.id, editingSound.previewUrl)}
+                /> : <button
+                  type="button"
+                  className="secondary compact"
+                  aria-label={`Refresh preview for ${editingSound.name}`}
+                  onClick={() => void refreshPlayableUrl(editingSound.id, '')}
+                >Refresh preview</button>}
             </div>
           </div>
         </section>

@@ -332,7 +332,7 @@ export default function Soundboard({
           {filteredSounds.map((sound) => {
             const isActive = activeSoundId === sound.id;
             const isPending = pendingSoundId === sound.id;
-            const padDisabled = isPending || (!isActive && Boolean(activeSoundId)) || !playbackAvailable;
+            const padDisabled = Boolean(pendingSoundId) || (!isActive && Boolean(activeSoundId)) || !playbackAvailable;
             return (
               <article key={sound.id} className={`sound-pad-wrap${isActive ? ' active' : ''}`} style={{ '--sound-color': sound.color } as CSSProperties}>
                 <button
@@ -387,7 +387,7 @@ export default function Soundboard({
           <output>{initialMusicState.volume}%</output>
           <input type="range" min="0" max="100" value={initialMusicState.volume} readOnly aria-label="Master volume" />
         </label>
-        <button type="button" className="danger" disabled={!activeSoundId || pendingStop || !selectedGuildId} onClick={() => void handleStop()}>{pendingStop ? 'Stopping…' : 'Stop sound'}</button>
+        <button type="button" className="danger" disabled={!channelId || pendingStop || !selectedGuildId || botStatus !== 'RUNNING'} onClick={() => void handleStop()}>{pendingStop ? 'Stopping…' : 'Stop sound'}</button>
       </section>
     </main>
   );

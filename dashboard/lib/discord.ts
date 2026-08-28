@@ -14,6 +14,82 @@ export interface Guild {
   icon: string | null;
 }
 
+const VIEW_CHANNEL = BigInt(1) << BigInt(10);
+const CONNECT = BigInt(1) << BigInt(20);
+const ADMINISTRATOR = BigInt(1) << BigInt(3);
+
+interface DiscordRole {
+  id: string;
+  permissions: string;
+}
+
+interface DiscordMember {
+  user?: { id: string };
+  roles: string[];
+}
+
+interface DiscordPermissionOverwrite {
+  id: string;
+  type: number;
+  allow: string;
+  deny: string;
+}
+
+interface DiscordVoiceChannel {
+  id: string;
+  guild_id?: string;
+  type: number;
+  permission_overwrites?: DiscordPermissionOverwrite[];
+}
+
+function permissionBits(value: string | undefined): bigint {
+  try {
+    return BigInt(value ?? '0');
+  } catch {
+    return BigInt(0);
+  }
+}
+
+function canViewAndConnect(
+  channel: DiscordVoiceChannel,
+  member: DiscordMember,
+  roles: DiscordRole[],
+  guildId: string,
+  memberId: string,
+): boolean {
+  const roleById = new Map(roles.map((role) => [role.id, role]));
+  let permissions = permissionBits(roleById.get(guildId)?.permissions);
+  for (const roleId of member.roles) permissions |= permissionBits(roleById.get(roleId)?.permissions);
+  if ((permissions & ADMINISTRATOR) !== BigInt(0)) return true;
+
+  const overwrites = channel.permission_overwrites ?? [];
+  const everyoneOverwrite = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === guildId);
+  if (everyoneOverwrite) {
+    permissions &= ~permissionBits(everyoneOverwrite.deny);
+    permissions |= permissionBits(everyoneOverwrite.allow);
+  }
+
+  const memberRoleIds = new Set(member.roles);
+  let roleDeny = BigInt(0);
+  let roleAllow = BigInt(0);
+  for (const overwrite of overwrites) {
+    if (overwrite.type !== 0 || !memberRoleIds.has(overwrite.id)) continue;
+    roleDeny |= permissionBits(overwrite.deny);
+    roleAllow |= permissionBits(overwrite.allow);
+  }
+  permissions &= ~roleDeny;
+  permissions |= roleAllow;
+
+  // The member-specific overwrite wins over aggregate role overwrites.
+  const memberOverwrite = overwrites.find((overwrite) => overwrite.type === 1 && overwrite.id === (member.user?.id ?? memberId));
+  if (memberOverwrite) {
+    permissions &= ~permissionBits(memberOverwrite.deny);
+    permissions |= permissionBits(memberOverwrite.allow);
+  }
+
+  return (permissions & VIEW_CHANNEL) !== BigInt(0) && (permissions & CONNECT) !== BigInt(0);
+}
+
 async function discordFetch<T>(path: string): Promise<T> {
   if (!TOKEN) throw new Error('DISCORD_TOKEN is not set');
   const res = await fetch(`${API}${path}`, {
@@ -77,6 +153,28 @@ export async function listVoiceChannels(guildId: string | null): Promise<TextCha
 /** Validate a client-supplied voice channel against the bot's guild channel list. */
 export async function isVoiceChannelInGuild(guildId: string, channelId: string): Promise<boolean> {
   return (await listVoiceChannels(guildId)).some((channel) => channel.id === channelId);
+}
+
+/** Verify the requesting Discord member can both view and connect to a voice channel. */
+export async function canMemberUseVoiceChannel(
+  guildId: string,
+  channelId: string,
+  discordUserId: string,
+): Promise<boolean> {
+  if (!guildId || !channelId || !discordUserId) return false;
+  try {
+    const [channel, member, roles] = await Promise.all([
+      discordFetch<DiscordVoiceChannel>(`/channels/${encodeURIComponent(channelId)}`),
+      discordFetch<DiscordMember>(`/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(discordUserId)}`),
+      discordFetch<DiscordRole[]>(`/guilds/${encodeURIComponent(guildId)}/roles`),
+    ]);
+    return channel.guild_id === guildId
+      && channel.type === 2
+      && canViewAndConnect(channel, member, roles, guildId, discordUserId);
+  } catch {
+    // Permission checks fail closed if Discord is unavailable or the member is absent.
+    return false;
+  }
 }
 
 /** Basic info about the given server. */

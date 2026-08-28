@@ -224,8 +224,9 @@ export async function handleSoundboard(
   if (action === 'stop') {
     await resolveSoundboardChannel(client, channelId, guildId);
     const session = sessions.get(guildId);
-    if (!session) throw new Error('No active soundboard session in this server.');
-    session.stopSound();
+    // Stop is idempotent so a reload or second tab can safely request it even
+    // when this process has no in-memory soundboard session.
+    session?.stopSound();
     return { ok: true };
   }
 

@@ -62,7 +62,7 @@ export interface SoundboardActionDependencies {
   getSessionUser: () => Promise<SessionUser | null>;
   getSelectedGuildId: () => Promise<string | null>;
   getAuthorizedGuildIds: (discordUserId: string) => Promise<readonly string[]>;
-  isVoiceChannelInGuild: (guildId: string, channelId: string) => Promise<boolean>;
+  canMemberUseVoiceChannel: (guildId: string, channelId: string, discordUserId: string) => Promise<boolean>;
   listSounds: () => Promise<SoundRecord[]>;
   getSound: (id: string) => Promise<SoundRecord | null>;
   getSignedSoundUrl: (path: string) => Promise<string>;
@@ -109,7 +109,7 @@ const PUBLIC_PROCESSING_MESSAGES = new Set([
 const CLEANUP_RETRY_ATTEMPTS = 3;
 const CLEANUP_WARNING = 'Audio cleanup could not be completed. Please retry or contact an administrator.';
 const DELETE_CLEANUP_WARNING = 'Sound deleted, but temporary cleanup could not be completed. An administrator can retry cleanup.';
-const trimLocks = new Map<string, Promise<void>>();
+const soundMutationLocks = new Map<string, Promise<void>>();
 
 function actionError(error: unknown, fallback: string): SoundMutationResult {
   if (error instanceof SoundboardBusyError) return { ok: false, message: error.message };
@@ -135,17 +135,17 @@ function addWarning<T>(result: SoundboardActionResult<T>, warning: string | null
   return warning ? { ...result, warning } : result;
 }
 
-async function withTrimLock<T>(soundId: string, work: () => Promise<T>): Promise<T> {
-  const previous = trimLocks.get(soundId) ?? Promise.resolve();
+async function withSoundMutationLock<T>(soundId: string, work: () => Promise<T>): Promise<T> {
+  const previous = soundMutationLocks.get(soundId) ?? Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((resolve) => { release = resolve; });
-  trimLocks.set(soundId, current);
+  soundMutationLocks.set(soundId, current);
   await previous;
   try {
     return await work();
   } finally {
     release();
-    if (trimLocks.get(soundId) === current) trimLocks.delete(soundId);
+    if (soundMutationLocks.get(soundId) === current) soundMutationLocks.delete(soundId);
   }
 }
 
@@ -175,6 +175,7 @@ function validSoundId(soundId: unknown): string | null {
 function validateMetadata(
   input: Partial<SoundMetadataInput> | null | undefined,
   allowCustomCategory: boolean,
+  retainedCustomCategory: string | null = null,
 ): SoundMutationResult<ValidSoundMetadata> {
   const name = typeof input?.name === 'string' ? input.name : '';
   const nameResult = validateUploadMeta(name, 'audio/wav', 0);
@@ -182,8 +183,13 @@ function validateMetadata(
 
   const category = typeof input?.category === 'string' ? input.category.trim() : '';
   if (!category || category.length > 40) return { ok: false, message: 'Category must be between 1 and 40 characters.' };
-  if (!allowCustomCategory && !isSharedSoundCategory(category)) {
-    return { ok: false, message: 'Members may only use the shared sound categories.' };
+  if (!allowCustomCategory && !isSharedSoundCategory(category) && category !== retainedCustomCategory) {
+    return {
+      ok: false,
+      message: retainedCustomCategory
+        ? 'Members may only use the shared sound categories or retain the existing custom category.'
+        : 'Members may only use the shared sound categories.',
+    };
   }
 
   const color = typeof input?.color === 'string' ? input.color.trim() : '';
@@ -308,8 +314,8 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         if (!authorizedGuildIds.includes(guildId)) {
           return { ok: false, message: 'You are not a member of the selected server.' };
         }
-        if (!await dependencies.isVoiceChannelInGuild(guildId, channelId)) {
-          return { ok: false, message: 'Pick a voice channel in the selected server.' };
+        if (!await dependencies.canMemberUseVoiceChannel(guildId, channelId, user.id)) {
+          return { ok: false, message: 'Pick a voice channel you can view and connect to in the selected server.' };
         }
         const sound = await dependencies.getSound(soundId);
         if (!sound) return { ok: false, message: 'Sound not found.' };
@@ -341,8 +347,8 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         if (!authorizedGuildIds.includes(guildId)) {
           return { ok: false, message: 'You are not a member of the selected server.' };
         }
-        if (!await dependencies.isVoiceChannelInGuild(guildId, normalizedChannelId)) {
-          return { ok: false, message: 'Pick a voice channel in the selected server.' };
+        if (!await dependencies.canMemberUseVoiceChannel(guildId, normalizedChannelId, user.id)) {
+          return { ok: false, message: 'Pick a voice channel you can view and connect to in the selected server.' };
         }
         await dependencies.sendSoundboardStop(guildId, normalizedChannelId);
         return { ok: true };
@@ -437,21 +443,26 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const id = validSoundId(soundId);
       if (!id) return { ok: false, message: 'Sound id is required.' };
       if (!input || typeof input !== 'object') return { ok: false, message: 'Sound details are required.' };
-      const metadata = validateMetadata(input, user.role === 'admin');
-      if (!metadata.ok) return metadata;
-
+      let requestedShortcut: string | null = null;
       try {
         const sound = await dependencies.getSound(id);
         if (!sound) return { ok: false, message: 'Sound not found.' };
         const authorization = authorizeSoundMutation(user, sound);
         if (authorization) return authorization;
+        const metadata = validateMetadata(
+          input,
+          user.role === 'admin',
+          isSharedSoundCategory(sound.category) ? null : sound.category,
+        );
+        if (!metadata.ok) return metadata;
+        requestedShortcut = metadata.value.shortcut;
         const conflict = await findShortcutConflict(dependencies, metadata.value.shortcut, sound.id);
         if (conflict) return { ok: false, message: shortcutConflictMessage(metadata.value.shortcut!, conflict.name) };
         const updated = await dependencies.updateSound(id, metadata.value);
         revalidateSoundboard(dependencies);
         return { ok: true, value: asClientSound(updated) };
       } catch (error) {
-        const race = await shortcutRaceResult(dependencies, error, metadata.ok ? metadata.value.shortcut : null, id);
+        const race = await shortcutRaceResult(dependencies, error, requestedShortcut, id);
         if (race) return race;
         return actionError(error, 'Failed to update sound.');
       }
@@ -466,7 +477,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const trim = normalizeTrimRequest(input);
       if (!trim.ok) return trim;
 
-      return withTrimLock(soundId, async () => {
+      return withSoundMutationLock(soundId, async () => {
         let stagedPlayablePath: string | null = null;
         try {
           const sound = await dependencies.getSound(soundId);
@@ -548,36 +559,38 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const id = validSoundId(soundId);
       if (!id) return { ok: false, message: 'Sound id is required.' };
 
-      let stage: SoundFileDeletionStage | null = null;
-      let rowDeleted = false;
-      try {
-        const sound = await dependencies.getSound(id);
-        if (!sound) return { ok: false, message: 'Sound not found.' };
-        const authorization = authorizeSoundMutation(user, sound);
-        if (authorization) return authorization;
-        stage = await dependencies.stageSoundFilesForDeletion({ sound, stageId: dependencies.createSoundId() });
-        await dependencies.deleteSoundFiles(stage);
-        await dependencies.deleteSoundRow(sound.id);
-        rowDeleted = true;
-        if (!await retryCleanup(() => dependencies.discardSoundFileStage(stage!))) {
+      return withSoundMutationLock(id, async () => {
+        let stage: SoundFileDeletionStage | null = null;
+        let rowDeleted = false;
+        try {
+          const sound = await dependencies.getSound(id);
+          if (!sound) return { ok: false, message: 'Sound not found.' };
+          const authorization = authorizeSoundMutation(user, sound);
+          if (authorization) return authorization;
+          stage = await dependencies.stageSoundFilesForDeletion({ sound, stageId: dependencies.createSoundId() });
+          await dependencies.deleteSoundFiles(stage);
+          await dependencies.deleteSoundRow(sound.id);
+          rowDeleted = true;
+          if (!await retryCleanup(() => dependencies.discardSoundFileStage(stage!))) {
+            revalidateSoundboard(dependencies);
+            return { ok: true, warning: DELETE_CLEANUP_WARNING };
+          }
           revalidateSoundboard(dependencies);
-          return { ok: true, warning: DELETE_CLEANUP_WARNING };
-        }
-        revalidateSoundboard(dependencies);
-        return { ok: true };
-      } catch (error) {
-        if (stage && !rowDeleted) {
-          const restored = await retryCleanup(() => dependencies.restoreSoundFiles(stage!));
-          if (!restored) {
-            return { ok: false, message: 'Failed to delete sound.', warning: CLEANUP_WARNING };
+          return { ok: true };
+        } catch (error) {
+          if (stage && !rowDeleted) {
+            const restored = await retryCleanup(() => dependencies.restoreSoundFiles(stage!));
+            if (!restored) {
+              return { ok: false, message: 'Failed to delete sound.', warning: CLEANUP_WARNING };
+            }
+            const stageDiscarded = await retryCleanup(() => dependencies.discardSoundFileStage(stage!));
+            if (!stageDiscarded) {
+              return { ok: false, message: 'Failed to delete sound.', warning: CLEANUP_WARNING };
+            }
           }
-          const stageDiscarded = await retryCleanup(() => dependencies.discardSoundFileStage(stage!));
-          if (!stageDiscarded) {
-            return { ok: false, message: 'Failed to delete sound.', warning: CLEANUP_WARNING };
-          }
+          return actionError(error, 'Failed to delete sound.');
         }
-        return actionError(error, 'Failed to delete sound.');
-      }
+      });
     },
 
     async reorderSounds(soundIds: string[]): Promise<SoundboardActionResult> {
@@ -622,7 +635,7 @@ async function loadDefaultDependencies(): Promise<SoundboardActionDependencies> 
     getSessionUser: session.getSoundboardSessionUser,
     getSelectedGuildId: guild.getSelectedGuildId,
     getAuthorizedGuildIds: async (discordUserId: string) => (await guilds.listAuthorizedGuilds(discordUserId)).map((item) => item.id),
-    isVoiceChannelInGuild: guilds.isVoiceChannelInGuild,
+    canMemberUseVoiceChannel: guilds.canMemberUseVoiceChannel,
     listSounds: sounds.listSounds,
     getSound: sounds.getSound,
     getSignedSoundUrl: sounds.getSignedSoundUrl,
