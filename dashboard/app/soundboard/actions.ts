@@ -82,9 +82,17 @@ export interface SoundboardActionDependencies {
     uploadedById: string;
     sourceStoragePath: string;
     playableStoragePath: string;
+  }) => Promise<{ token: string }>;
+  heartbeatSoundUploadRecovery: (input: { soundId: string; token: string }) => Promise<void>;
+  markSoundUploadRecoveryPending: (input: { soundId: string; token: string; lastError: string }) => Promise<void>;
+  completeSoundUploadRecovery: (input: {
+    soundId: string;
+    token: string;
+    sourceStoragePath: string;
+    playableStoragePath: string;
+    outcome: 'row_committed' | 'objects_absent';
   }) => Promise<void>;
-  markSoundUploadRecoveryPending: (input: { soundId: string; lastError: string }) => Promise<void>;
-  completeSoundUploadRecovery: (soundId: string) => Promise<void>;
+  confirmStorageObjectAbsent: (path: string) => Promise<boolean>;
   deleteStorageObject: (path: string) => Promise<void>;
   downloadSource: (input: { uploadedById: string; soundId: string }) => Promise<Blob>;
   stageSoundFilesForDeletion: (input: {
@@ -196,7 +204,9 @@ async function cleanupWithRecovery(
   input: { soundId: string | null; objectPath: string; cleanupKind: SoundCleanupKind },
   cleanup: () => Promise<void>,
 ): Promise<CleanupOutcome> {
-  if (await retryCleanup(cleanup)) return { cleaned: true, recoveryRequired: false };
+  if (await retryCleanup(cleanup) && await dependencies.confirmStorageObjectAbsent(input.objectPath)) {
+    return { cleaned: true, recoveryRequired: false };
+  }
   try {
     await dependencies.enqueueSoundCleanup(input);
     return { cleaned: false, recoveryRequired: false };
@@ -506,6 +516,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const soundId = dependencies.createSoundId();
       const uploadedPaths: string[] = [];
       let uploadRecoveryPrepared = false;
+      let uploadRecoveryToken: string | null = null;
       const playableVersionId = dependencies.createSoundId();
       const expectedSourceStoragePath = `sounds/${user.id}/${soundId}/source`;
       const expectedPlayableStoragePath = `sounds/${user.id}/${soundId}/playable-${playableVersionId}`;
@@ -523,13 +534,14 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           trimStartMs: trim.value.trimStartMs,
           trimEndMs: trim.value.trimEndMs,
         });
-        await dependencies.prepareSoundUploadRecovery({
+        const uploadLease = await dependencies.prepareSoundUploadRecovery({
           soundId,
           uploadedById: user.id,
           sourceStoragePath: expectedSourceStoragePath,
           playableStoragePath: expectedPlayableStoragePath,
         });
         uploadRecoveryPrepared = true;
+        uploadRecoveryToken = uploadLease.token;
         const uploadedSourceStoragePath = await dependencies.uploadSource({
           uploadedById: user.id,
           soundId,
@@ -537,6 +549,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           mimeType: sourceMimeType,
         });
         uploadedPaths.push(uploadedSourceStoragePath);
+        await dependencies.heartbeatSoundUploadRecovery({ soundId, token: uploadRecoveryToken });
         const storagePath = await dependencies.uploadPlayableClip({
           uploadedById: user.id,
           soundId,
@@ -545,6 +558,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           versionId: playableVersionId,
         });
         uploadedPaths.push(storagePath);
+        await dependencies.heartbeatSoundUploadRecovery({ soundId, token: uploadRecoveryToken });
         const sound = await dependencies.insertSound({
           id: soundId,
           ...metadata.value,
@@ -560,7 +574,15 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           sortOrder: 0,
         });
         try {
-          if (uploadRecoveryPrepared) await dependencies.completeSoundUploadRecovery(soundId);
+          if (uploadRecoveryPrepared && uploadRecoveryToken) {
+            await dependencies.completeSoundUploadRecovery({
+              soundId,
+              token: uploadRecoveryToken,
+              sourceStoragePath: expectedSourceStoragePath,
+              playableStoragePath: expectedPlayableStoragePath,
+              outcome: 'row_committed',
+            });
+          }
         } catch {
           revalidateSoundboard(dependencies);
           return {
@@ -576,17 +598,23 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         let cleanupWarning: string | null = null;
         let recoveryRequired = false;
         let cleanupPending = false;
-        if (uploadRecoveryPrepared) {
+        if (uploadRecoveryPrepared && uploadRecoveryToken) {
           try {
             await dependencies.markSoundUploadRecoveryPending({
               soundId,
+              token: uploadRecoveryToken,
               lastError: 'Sound row insertion or upload failed; uploaded objects require cleanup.',
             });
           } catch {
             recoveryRequired = true;
           }
         }
-        for (const path of uploadedPaths.reverse()) {
+        const cleanupPaths = [...new Set([
+          expectedSourceStoragePath,
+          expectedPlayableStoragePath,
+          ...uploadedPaths,
+        ])];
+        for (const path of cleanupPaths.reverse()) {
           const cleanup = await cleanupWithRecovery(
             dependencies,
             { soundId, objectPath: path, cleanupKind: 'delete_object' },
@@ -595,13 +623,20 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           if (!cleanup.cleaned) {
             cleanupWarning = CLEANUP_WARNING;
             cleanupPending = true;
+            recoveryRequired = true;
           }
           recoveryRequired ||= cleanup.recoveryRequired;
         }
-        if (uploadRecoveryPrepared && uploadedPaths.length === 0) recoveryRequired = true;
-        if (uploadRecoveryPrepared && uploadedPaths.length > 0 && !cleanupPending && !recoveryRequired) {
+        if (uploadRecoveryPrepared && (!uploadRecoveryToken || !cleanupPending) && !recoveryRequired) {
           try {
-            await dependencies.completeSoundUploadRecovery(soundId);
+            if (!uploadRecoveryToken) throw new Error('Upload recovery token is unavailable.');
+            await dependencies.completeSoundUploadRecovery({
+              soundId,
+              token: uploadRecoveryToken,
+              sourceStoragePath: expectedSourceStoragePath,
+              playableStoragePath: expectedPlayableStoragePath,
+              outcome: 'objects_absent',
+            });
           } catch {
             recoveryRequired = true;
           }
@@ -1040,8 +1075,10 @@ async function loadDefaultDependencies(): Promise<SoundboardActionDependencies> 
     uploadSource: sounds.uploadSource,
     uploadPlayableClip: sounds.uploadPlayableClip,
     prepareSoundUploadRecovery: sounds.prepareSoundUploadRecovery,
+    heartbeatSoundUploadRecovery: sounds.heartbeatSoundUploadRecovery,
     markSoundUploadRecoveryPending: sounds.markSoundUploadRecoveryPending,
     completeSoundUploadRecovery: sounds.completeSoundUploadRecovery,
+    confirmStorageObjectAbsent: sounds.confirmStorageObjectAbsent,
     deleteStorageObject: sounds.deleteStorageObject,
     downloadSource: sounds.downloadSource,
     stageSoundFilesForDeletion: sounds.stageSoundFilesForDeletion,

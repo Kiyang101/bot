@@ -63,9 +63,11 @@ function createDependencies(overrides: Partial<SoundboardActionDependencies> = {
     prepareSoundTrimMutation: async () => undefined,
     markSoundMutationRecovery: async () => undefined,
     completeSoundMutationRecovery: async () => undefined,
-    prepareSoundUploadRecovery: async () => undefined,
+    prepareSoundUploadRecovery: async () => ({ token: 'upload-token' }),
+    heartbeatSoundUploadRecovery: async () => undefined,
     markSoundUploadRecoveryPending: async () => undefined,
     completeSoundUploadRecovery: async () => undefined,
+    confirmStorageObjectAbsent: async () => true,
     commitSoundTrim: async (input) => {
       const update = overrides.updateSound ?? (async () => ownSound);
       return update(input.soundId, {
@@ -309,6 +311,7 @@ test('upload persists cleanup intent before uploads and keeps paths recoverable 
     prepareSoundUploadRecovery: async (input) => {
       events.push('prepare');
       uploadIntent = input as unknown as Record<string, unknown>;
+      return { token: 'upload-token' };
     },
     uploadSource: async () => {
       events.push('source-upload');
@@ -346,6 +349,67 @@ test('upload persists cleanup intent before uploads and keeps paths recoverable 
     recoveryRequired: true,
   });
   assert.doesNotMatch(JSON.stringify(result), /sounds\//);
+});
+
+test('upload failure cleans both deterministic objects and keeps recovery when playable absence is uncertain', async () => {
+  const deleted: string[] = [];
+  const completed: unknown[] = [];
+  const sourcePath = 'sounds/member-1/sound-new/source';
+  const playablePath = 'sounds/member-1/sound-new/playable-sound-new';
+  const wav = new Uint8Array([
+    0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+  ]);
+  const actions = createSoundboardActions(createDependencies({
+    prepareSoundUploadRecovery: async () => ({ token: 'upload-token' }),
+    uploadSource: async () => sourcePath,
+    uploadPlayableClip: async () => { throw new Error('playable upload status unknown'); },
+    deleteStorageObject: async (path) => { deleted.push(path); },
+    confirmStorageObjectAbsent: async (path) => path === sourcePath,
+    completeSoundUploadRecovery: async (input) => { completed.push(input); },
+    insertSound: async () => { throw new Error('database unavailable'); },
+    trimSourceFile: async () => ({ buffer: Buffer.from('clip'), durationSec: 0.4, sourceDurationSec: 1 }),
+  }));
+
+  const result = await actions.uploadSound({
+    name: 'Recoverable', category: 'Reactions', color: '#5865f2', shortcut: null,
+    gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
+    file: { type: 'audio/wav', size: wav.byteLength, arrayBuffer: async () => wav.buffer },
+    trimStartMs: 0,
+    trimEndMs: 500,
+  });
+
+  assert.deepEqual(deleted.sort(), [sourcePath, playablePath].sort());
+  assert.deepEqual(completed, []);
+  assert.equal(result.ok, false);
+  assert.equal(result.warning, 'Audio cleanup could not be completed. Please retry or contact an administrator.');
+  assert.equal(result.recoveryRequired, true);
+});
+
+test('successful upload completion is bound to the upload token and both expected paths', async () => {
+  const completions: unknown[] = [];
+  const actions = createSoundboardActions(createDependencies({
+    prepareSoundUploadRecovery: async () => ({ token: 'upload-token' }),
+    completeSoundUploadRecovery: async (input) => { completions.push(input); },
+  }));
+
+  const result = await actions.uploadSound({
+    name: 'Complete', category: 'Reactions', color: '#5865f2', shortcut: null,
+    gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
+    file: { type: 'audio/wav', size: 12, arrayBuffer: async () => new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+    ]).buffer },
+    trimStartMs: 0,
+    trimEndMs: 500,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(completions, [{
+    soundId: 'sound-new',
+    token: 'upload-token',
+    sourceStoragePath: 'sounds/member-1/sound-new/source',
+    playableStoragePath: 'sounds/member-1/sound-new/playable-sound-new',
+    outcome: 'row_committed',
+  }]);
 });
 
 test('upload rejects ID3-prefixed unsupported data before processing or storage', async () => {

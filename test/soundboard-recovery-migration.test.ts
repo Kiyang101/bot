@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { isUploadRecoveryCandidate, resolveUploadRecovery } from '../dashboard/lib/sound-recovery';
 
 const migration = readFileSync(
   new URL('../supabase/migrations/20260829010000_soundboard_durable_recovery_fixes.sql', import.meta.url),
@@ -87,4 +88,52 @@ test('trim keeps the five-argument compatibility overload alongside complete int
   assert.match(migration, /CREATE OR REPLACE FUNCTION public\.prepare_sound_trim_mutation\(\n  p_sound_id uuid,\n  p_token uuid,\n  p_expected_version bigint,\n  p_version_id uuid,\n  p_previous_playable_path text\n\)/);
   assert.match(migration, /CREATE OR REPLACE FUNCTION public\.prepare_sound_trim_mutation\(\n  p_sound_id uuid,\n  p_token uuid,\n  p_expected_version bigint,\n  p_version_id uuid,\n  p_source_path text,/);
   assert.doesNotMatch(migration, /DROP FUNCTION IF EXISTS public\.prepare_sound_trim_mutation\(uuid, uuid, bigint, uuid, text\)/);
+});
+
+test('legacy trim preparation accepts a valid lease and rejects stale or mismatched callers', () => {
+  const legacyFunction = migration.match(
+    /CREATE OR REPLACE FUNCTION public\.prepare_sound_trim_mutation\(\n  p_sound_id uuid,\n  p_token uuid,\n  p_expected_version bigint,\n  p_version_id uuid,\n  p_previous_playable_path text\n\)[\s\S]*?\n\$\$;/,
+  )?.[0] ?? '';
+  assert.match(legacyFunction, /RETURN true/);
+  assert.match(legacyFunction, /lease\.token = p_token/);
+  assert.match(legacyFunction, /sound\."storagePath" = p_previous_playable_path/);
+  assert.doesNotMatch(legacyFunction, /RETURN false;\n  END IF;\n  RETURN false;/);
+});
+
+test('upload recovery has active lease, atomic claim, and cleanup-bound terminal contracts', () => {
+  assert.match(migration, /"leaseToken" uuid/);
+  assert.match(migration, /"leaseExpiresAt" timestamp with time zone/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.heartbeat_sound_upload_recovery/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.claim_sound_upload_recovery/);
+  assert.match(migration, /state = 'uploading'[\s\S]*leaseExpiresAt.*CURRENT_TIMESTAMP/);
+  assert.match(migration, /p_source_absent boolean/);
+  assert.match(migration, /p_playable_absent boolean/);
+  assert.match(migration, /p_outcome text/);
+  assert.match(migration, /p_source_path <> recovery\."sourceStoragePath"/);
+  assert.match(migration, /p_playable_path <> recovery\."playableStoragePath"/);
+  assert.match(migration, /recovery\.state (?:<>|=) 'cleanup_pending'/);
+  assert.match(migration, /recovery\."claimToken" IS NOT NULL[\s\S]*recovery\."claimExpiresAt" > CURRENT_TIMESTAMP/);
+});
+
+test('upload recovery helper preserves active intent until both objects are absent', () => {
+  const now = Date.parse('2026-08-29T00:00:00.000Z');
+  assert.equal(isUploadRecoveryCandidate({
+    state: 'uploading',
+    nextAttemptAt: '2026-08-28T23:59:00.000Z',
+    leaseExpiresAt: '2026-08-29T00:05:00.000Z',
+  }, now), false);
+  assert.equal(isUploadRecoveryCandidate({
+    state: 'uploading',
+    nextAttemptAt: '2026-08-28T23:59:00.000Z',
+    leaseExpiresAt: '2026-08-28T23:59:00.000Z',
+  }, now), true);
+  assert.equal(resolveUploadRecovery({
+    hasSoundRow: false, soundPathsMatch: false, sourceAbsent: true, playableAbsent: false,
+  }), 'defer');
+  assert.equal(resolveUploadRecovery({
+    hasSoundRow: false, soundPathsMatch: false, sourceAbsent: true, playableAbsent: true,
+  }), 'objects_absent');
+  assert.equal(resolveUploadRecovery({
+    hasSoundRow: true, soundPathsMatch: true, sourceAbsent: false, playableAbsent: false,
+  }), 'row_committed');
 });

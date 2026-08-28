@@ -113,6 +113,10 @@ CREATE TABLE IF NOT EXISTS public."SoundUploadRecovery" (
   "sourceStoragePath" text NOT NULL,
   "playableStoragePath" text NOT NULL,
   state text NOT NULL CHECK (state IN ('uploading', 'cleanup_pending')),
+  "leaseToken" uuid NOT NULL DEFAULT gen_random_uuid(),
+  "leaseExpiresAt" timestamp with time zone NOT NULL DEFAULT (CURRENT_TIMESTAMP + interval '15 minutes'),
+  "claimToken" uuid,
+  "claimExpiresAt" timestamp with time zone,
   attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   "nextAttemptAt" timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "lastError" text,
@@ -124,40 +128,85 @@ CREATE TABLE IF NOT EXISTS public."SoundUploadRecovery" (
   )
 );
 
+ALTER TABLE public."SoundUploadRecovery"
+  ADD COLUMN IF NOT EXISTS "leaseToken" uuid,
+  ADD COLUMN IF NOT EXISTS "leaseExpiresAt" timestamp with time zone,
+  ADD COLUMN IF NOT EXISTS "claimToken" uuid,
+  ADD COLUMN IF NOT EXISTS "claimExpiresAt" timestamp with time zone;
+
+UPDATE public."SoundUploadRecovery"
+SET "leaseToken" = COALESCE("leaseToken", gen_random_uuid()),
+    "leaseExpiresAt" = COALESCE("leaseExpiresAt", "updatedAt" + interval '15 minutes');
+
+ALTER TABLE public."SoundUploadRecovery"
+  ALTER COLUMN "leaseToken" SET NOT NULL,
+  ALTER COLUMN "leaseExpiresAt" SET NOT NULL;
+
 ALTER TABLE public."SoundUploadRecovery" ENABLE ROW LEVEL SECURITY;
 GRANT ALL ON public."SoundUploadRecovery" TO service_role;
 
 CREATE INDEX IF NOT EXISTS "SoundUploadRecovery_due_idx"
   ON public."SoundUploadRecovery" (state, "nextAttemptAt", "createdAt");
 
+DROP FUNCTION IF EXISTS public.prepare_sound_upload_recovery(uuid, text, text, text);
 CREATE OR REPLACE FUNCTION public.prepare_sound_upload_recovery(
   p_sound_id uuid,
   p_uploaded_by_id text,
   p_source_path text,
   p_playable_path text
 )
+RETURNS jsonb
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  upload_token uuid := gen_random_uuid();
+BEGIN
+  IF p_uploaded_by_id IS NULL OR p_uploaded_by_id = '' OR p_uploaded_by_id ~ '[/\\]'
+     OR p_source_path <> 'sounds/' || p_uploaded_by_id || '/' || p_sound_id::text || '/source'
+     OR p_playable_path !~ ('^sounds/' || p_uploaded_by_id || '/' || p_sound_id::text || '/playable-[^/]+$') THEN
+    RETURN jsonb_build_object('prepared', false);
+  END IF;
+
+  INSERT INTO public."SoundUploadRecovery" (
+    "soundId", "uploadedById", "sourceStoragePath", "playableStoragePath", state,
+    "leaseToken", "leaseExpiresAt"
+  ) VALUES (
+    p_sound_id, p_uploaded_by_id, p_source_path, p_playable_path, 'uploading',
+    upload_token, CURRENT_TIMESTAMP + interval '15 minutes'
+  );
+  RETURN jsonb_build_object('prepared', true, 'token', upload_token);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.heartbeat_sound_upload_recovery(
+  p_sound_id uuid,
+  p_token uuid,
+  p_lease_seconds integer DEFAULT 900
+)
 RETURNS boolean
 LANGUAGE plpgsql
 SET search_path = public
 AS $$
 BEGIN
-  IF p_uploaded_by_id IS NULL OR p_uploaded_by_id = '' OR p_uploaded_by_id ~ '[/\\]'
-     OR p_source_path <> 'sounds/' || p_uploaded_by_id || '/' || p_sound_id::text || '/source'
-     OR p_playable_path !~ ('^sounds/' || p_uploaded_by_id || '/' || p_sound_id::text || '/playable-[^/]+$') THEN
-    RETURN false;
+  IF p_lease_seconds NOT BETWEEN 30 AND 900 THEN
+    RAISE EXCEPTION 'Invalid upload recovery lease request.';
   END IF;
-
-  INSERT INTO public."SoundUploadRecovery" (
-    "soundId", "uploadedById", "sourceStoragePath", "playableStoragePath", state
-  ) VALUES (
-    p_sound_id, p_uploaded_by_id, p_source_path, p_playable_path, 'uploading'
-  );
-  RETURN true;
+  UPDATE public."SoundUploadRecovery"
+  SET "leaseExpiresAt" = CURRENT_TIMESTAMP + make_interval(secs => p_lease_seconds),
+      "updatedAt" = CURRENT_TIMESTAMP
+  WHERE "soundId" = p_sound_id
+    AND "leaseToken" = p_token
+    AND state = 'uploading'
+    AND "leaseExpiresAt" > CURRENT_TIMESTAMP;
+  RETURN FOUND;
 END;
 $$;
 
+DROP FUNCTION IF EXISTS public.mark_sound_upload_recovery_pending(uuid, text);
 CREATE OR REPLACE FUNCTION public.mark_sound_upload_recovery_pending(
   p_sound_id uuid,
+  p_token uuid,
   p_last_error text
 )
 RETURNS boolean
@@ -168,32 +217,179 @@ BEGIN
   UPDATE public."SoundUploadRecovery"
   SET state = 'cleanup_pending',
       "lastError" = p_last_error,
+      "claimToken" = NULL,
+      "claimExpiresAt" = NULL,
       "updatedAt" = CURRENT_TIMESTAMP
-  WHERE "soundId" = p_sound_id;
+  WHERE "soundId" = p_sound_id
+    AND "leaseToken" = p_token
+    AND state = 'uploading';
   RETURN FOUND;
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION public.complete_sound_upload_recovery(
-  p_sound_id uuid
+CREATE OR REPLACE FUNCTION public.claim_sound_upload_recovery(
+  p_recovery_id uuid,
+  p_claim_token uuid,
+  p_lease_seconds integer DEFAULT 300
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  recovery_row public."SoundUploadRecovery"%ROWTYPE;
+BEGIN
+  IF p_claim_token IS NULL OR p_lease_seconds NOT BETWEEN 30 AND 900 THEN
+    RAISE EXCEPTION 'Invalid upload recovery claim lease request.';
+  END IF;
+  SELECT * INTO recovery_row
+  FROM public."SoundUploadRecovery"
+  WHERE id = p_recovery_id
+  FOR UPDATE;
+
+  IF recovery_row.id IS NULL
+     OR recovery_row.state NOT IN ('uploading', 'cleanup_pending')
+     OR (recovery_row.state = 'uploading' AND recovery_row."leaseExpiresAt" > CURRENT_TIMESTAMP)
+     OR (recovery_row."claimToken" IS NOT NULL AND recovery_row."claimExpiresAt" > CURRENT_TIMESTAMP) THEN
+    RETURN jsonb_build_object('claimed', false);
+  END IF;
+
+  UPDATE public."SoundUploadRecovery"
+  SET state = 'cleanup_pending',
+      "claimToken" = p_claim_token,
+      "claimExpiresAt" = CURRENT_TIMESTAMP + make_interval(secs => p_lease_seconds),
+      "updatedAt" = CURRENT_TIMESTAMP
+  WHERE id = p_recovery_id;
+  RETURN jsonb_build_object(
+    'claimed', true,
+    'sound_id', recovery_row."soundId",
+    'source_storage_path', recovery_row."sourceStoragePath",
+    'playable_storage_path', recovery_row."playableStoragePath"
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.defer_sound_upload_recovery(
+  p_recovery_id uuid,
+  p_claim_token uuid,
+  p_last_error text,
+  p_max_attempts integer DEFAULT 3
 )
 RETURNS boolean
 LANGUAGE plpgsql
 SET search_path = public
 AS $$
 BEGIN
-  DELETE FROM public."SoundUploadRecovery"
-  WHERE "soundId" = p_sound_id;
+  IF p_max_attempts NOT BETWEEN 1 AND 10 THEN
+    RAISE EXCEPTION 'Invalid upload recovery attempt limit.';
+  END IF;
+  UPDATE public."SoundUploadRecovery"
+  SET attempts = attempts + 1,
+      "nextAttemptAt" = CURRENT_TIMESTAMP + make_interval(secs => LEAST(60 * (attempts + 1), 900)),
+      "lastError" = p_last_error,
+      "claimToken" = NULL,
+      "claimExpiresAt" = NULL,
+      "updatedAt" = CURRENT_TIMESTAMP
+  WHERE id = p_recovery_id
+    AND "claimToken" = p_claim_token;
   RETURN FOUND;
 END;
 $$;
 
+DROP FUNCTION IF EXISTS public.complete_sound_upload_recovery(uuid);
+CREATE OR REPLACE FUNCTION public.complete_sound_upload_recovery(
+  p_sound_id uuid,
+  p_token uuid,
+  p_source_path text,
+  p_playable_path text,
+  p_outcome text,
+  p_source_absent boolean DEFAULT false,
+  p_playable_absent boolean DEFAULT false
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  recovery public."SoundUploadRecovery"%ROWTYPE;
+  token_is_claim boolean;
+  sound_row public."Sound"%ROWTYPE;
+BEGIN
+  SELECT * INTO recovery
+  FROM public."SoundUploadRecovery"
+  WHERE "soundId" = p_sound_id
+  FOR UPDATE;
+  IF recovery.id IS NULL THEN
+    IF p_outcome = 'row_committed' THEN
+      SELECT * INTO sound_row FROM public."Sound" WHERE id = p_sound_id;
+      RETURN sound_row.id IS NOT NULL
+        AND sound_row."sourceStoragePath" = p_source_path
+        AND sound_row."storagePath" = p_playable_path
+        AND NOT p_source_absent
+        AND NOT p_playable_absent;
+    END IF;
+    RETURN p_outcome = 'objects_absent'
+      AND p_source_absent
+      AND p_playable_absent
+      AND NOT EXISTS (SELECT 1 FROM public."Sound" WHERE id = p_sound_id);
+  END IF;
+  IF p_source_path <> recovery."sourceStoragePath"
+     OR p_playable_path <> recovery."playableStoragePath"
+     OR p_outcome NOT IN ('row_committed', 'objects_absent') THEN
+    RETURN false;
+  END IF;
+
+  token_is_claim := recovery."claimToken" IS NOT NULL AND recovery."claimToken" = p_token;
+  IF NOT token_is_claim AND recovery."leaseToken" <> p_token THEN
+    RETURN false;
+  END IF;
+  IF NOT token_is_claim
+     AND recovery."claimToken" IS NOT NULL
+     AND recovery."claimExpiresAt" > CURRENT_TIMESTAMP THEN
+    RETURN false;
+  END IF;
+  IF token_is_claim AND recovery."claimExpiresAt" <= CURRENT_TIMESTAMP THEN
+    RETURN false;
+  END IF;
+  IF NOT token_is_claim AND recovery."leaseExpiresAt" <= CURRENT_TIMESTAMP AND p_outcome = 'row_committed' THEN
+    RETURN false;
+  END IF;
+
+  IF p_outcome = 'row_committed' THEN
+    IF recovery.state NOT IN ('uploading', 'cleanup_pending') OR p_source_absent OR p_playable_absent THEN
+      RETURN false;
+    END IF;
+    SELECT * INTO sound_row FROM public."Sound" WHERE id = p_sound_id;
+    IF sound_row.id IS NULL
+       OR sound_row."sourceStoragePath" <> recovery."sourceStoragePath"
+       OR sound_row."storagePath" <> recovery."playableStoragePath" THEN
+      RETURN false;
+    END IF;
+  ELSE
+    IF recovery.state <> 'cleanup_pending'
+       OR NOT p_source_absent OR NOT p_playable_absent
+       OR EXISTS (SELECT 1 FROM public."Sound" WHERE id = p_sound_id) THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  DELETE FROM public."SoundUploadRecovery" WHERE id = recovery.id;
+  RETURN true;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.prepare_sound_upload_recovery(uuid, text, text, text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.mark_sound_upload_recovery_pending(uuid, text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.complete_sound_upload_recovery(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.heartbeat_sound_upload_recovery(uuid, uuid, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.mark_sound_upload_recovery_pending(uuid, uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.claim_sound_upload_recovery(uuid, uuid, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.defer_sound_upload_recovery(uuid, uuid, text, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.complete_sound_upload_recovery(uuid, uuid, text, text, text, boolean, boolean) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.prepare_sound_upload_recovery(uuid, text, text, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.mark_sound_upload_recovery_pending(uuid, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.complete_sound_upload_recovery(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.heartbeat_sound_upload_recovery(uuid, uuid, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.mark_sound_upload_recovery_pending(uuid, uuid, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.claim_sound_upload_recovery(uuid, uuid, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.defer_sound_upload_recovery(uuid, uuid, text, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.complete_sound_upload_recovery(uuid, uuid, text, text, text, boolean, boolean) TO service_role;
 
 DROP INDEX IF EXISTS "SoundMutationRecovery_active_sound_key";
 CREATE UNIQUE INDEX "SoundMutationRecovery_active_sound_key"
@@ -271,8 +467,10 @@ END;
 $$;
 
 -- Keep the five-argument overload during the rolling compatibility window.
--- It validates the old call's lease and path but returns false because the old
--- payload cannot establish the complete replay intent required for recovery.
+-- Older callers receive the same successful prepare acknowledgement when the
+-- authoritative lease/version/path check is valid. They do not get a partial
+-- replay row because the old payload lacks the measurements required for safe
+-- replay; new callers use the complete overload below.
 CREATE OR REPLACE FUNCTION public.prepare_sound_trim_mutation(
   p_sound_id uuid,
   p_token uuid,
@@ -296,7 +494,7 @@ BEGIN
       AND sound."mutationVersion" = p_expected_version
       AND sound."storagePath" = p_previous_playable_path
   ) THEN
-    RETURN false;
+    RETURN true;
   END IF;
   RETURN false;
 END;

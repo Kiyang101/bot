@@ -1,7 +1,9 @@
 import 'server-only';
+import { randomUUID } from 'node:crypto';
 import { assertSupabaseResult } from './database';
 import { trimSourceFile } from './audio';
 import { mapSoundRow as mapValidatedSoundRow } from './sound-validation';
+import { isUploadRecoveryCandidate, resolveUploadRecovery } from './sound-recovery';
 import type { SoundRecord } from './sound-types';
 import { createAdminClient } from './supabase/admin';
 
@@ -31,6 +33,10 @@ export class SoundDeletionStagingError extends Error {
 export interface SoundMutationLease {
   token: string;
   mutationVersion: number;
+}
+
+export interface SoundUploadRecoveryLease {
+  token: string;
 }
 
 export type SoundMutationOperation = 'trim' | 'delete';
@@ -220,7 +226,7 @@ export async function prepareSoundUploadRecovery(input: {
   uploadedById: string;
   sourceStoragePath: string;
   playableStoragePath: string;
-}): Promise<void> {
+}): Promise<SoundUploadRecoveryLease> {
   if (!isSoundPath(input.sourceStoragePath) || !isSoundPath(input.playableStoragePath)) {
     throw new Error('Sound upload recovery paths are invalid.');
   }
@@ -230,17 +236,34 @@ export async function prepareSoundUploadRecovery(input: {
     p_source_path: input.sourceStoragePath,
     p_playable_path: input.playableStoragePath,
   });
-  if (!rpcBoolean(assertSupabaseResult('prepare sound upload recovery', result))) {
+  const value = rpcObject(assertSupabaseResult('prepare sound upload recovery', result));
+  if (value?.prepared !== true || typeof value.token !== 'string') {
     throw new Error('Sound upload recovery could not be prepared.');
+  }
+  return { token: value.token };
+}
+
+/** Extends the active upload lease while Storage and row work is in flight. */
+export async function heartbeatSoundUploadRecovery(input: { soundId: string; token: string }): Promise<void> {
+  if (!rpcBoolean(assertSupabaseResult(
+    'heartbeat sound upload recovery',
+    await createAdminClient().rpc('heartbeat_sound_upload_recovery', {
+      p_sound_id: input.soundId,
+      p_token: input.token,
+      p_lease_seconds: 900,
+    }),
+  ))) {
+    throw new Error('Sound upload recovery lease expired.');
   }
 }
 
 /** Marks an upload ledger row as requiring object cleanup after a failed upload. */
-export async function markSoundUploadRecoveryPending(input: { soundId: string; lastError: string }): Promise<void> {
+export async function markSoundUploadRecoveryPending(input: { soundId: string; token: string; lastError: string }): Promise<void> {
   if (!rpcBoolean(assertSupabaseResult(
     'mark sound upload recovery pending',
     await createAdminClient().rpc('mark_sound_upload_recovery_pending', {
       p_sound_id: input.soundId,
+      p_token: input.token,
       p_last_error: input.lastError,
     }),
   ))) {
@@ -249,13 +272,62 @@ export async function markSoundUploadRecoveryPending(input: { soundId: string; l
 }
 
 /** Removes an upload ledger row only after the row/object outcome is settled. */
-export async function completeSoundUploadRecovery(soundId: string): Promise<void> {
+export async function completeSoundUploadRecovery(input: {
+  soundId: string;
+  token: string;
+  sourceStoragePath: string;
+  playableStoragePath: string;
+  outcome: 'row_committed' | 'objects_absent';
+}): Promise<void> {
   if (!rpcBoolean(assertSupabaseResult(
     'complete sound upload recovery',
-    await createAdminClient().rpc('complete_sound_upload_recovery', { p_sound_id: soundId }),
+    await createAdminClient().rpc('complete_sound_upload_recovery', {
+      p_sound_id: input.soundId,
+      p_token: input.token,
+      p_source_path: input.sourceStoragePath,
+      p_playable_path: input.playableStoragePath,
+      p_outcome: input.outcome,
+      p_source_absent: input.outcome === 'objects_absent',
+      p_playable_absent: input.outcome === 'objects_absent',
+    }),
   ))) {
     throw new Error('Sound upload recovery could not be completed.');
   }
+}
+
+/** Claims only an expired upload lease or an unclaimed cleanup record. */
+export async function claimSoundUploadRecovery(input: { recoveryId: string; claimToken: string }): Promise<SoundUploadRecovery | null> {
+  const value = rpcObject(assertSupabaseResult(
+    'claim sound upload recovery',
+    await createAdminClient().rpc('claim_sound_upload_recovery', {
+      p_recovery_id: input.recoveryId,
+      p_claim_token: input.claimToken,
+    }),
+  ));
+  if (value?.claimed !== true) return null;
+  if (typeof value.sound_id !== 'string' || typeof value.source_storage_path !== 'string'
+      || typeof value.playable_storage_path !== 'string') {
+    throw new Error('Claimed sound upload recovery is incomplete.');
+  }
+  return {
+    id: input.recoveryId,
+    soundId: value.sound_id,
+    sourceStoragePath: value.source_storage_path,
+    playableStoragePath: value.playable_storage_path,
+    claimToken: input.claimToken,
+  };
+}
+
+export async function deferSoundUploadRecovery(input: { recoveryId: string; claimToken: string; lastError: string }): Promise<void> {
+  assertSupabaseResult(
+    'defer sound upload recovery',
+    await createAdminClient().rpc('defer_sound_upload_recovery', {
+      p_recovery_id: input.recoveryId,
+      p_claim_token: input.claimToken,
+      p_last_error: input.lastError,
+      p_max_attempts: 3,
+    }),
+  );
 }
 
 /** Persists the generated trim path before the object upload starts. */
@@ -409,48 +481,120 @@ function recoveryStage(recovery: SoundMutationRecovery, requireSourceMimeType = 
 }
 
 interface SoundUploadRecovery {
+  id: string;
   soundId: string;
   sourceStoragePath: string;
   playableStoragePath: string;
+  claimToken?: string;
+}
+
+interface SoundUploadRecoveryCandidate extends SoundUploadRecovery {
+  state: 'uploading' | 'cleanup_pending';
+  nextAttemptAt: string;
+  leaseExpiresAt: string;
 }
 
 /** Lists upload cleanup intents without exposing paths outside server code. */
-async function listPendingSoundUploadRecoveries(limit = 50): Promise<SoundUploadRecovery[]> {
+async function listPendingSoundUploadRecoveries(limit = 50): Promise<SoundUploadRecoveryCandidate[]> {
   const result = await createAdminClient()
     .from('SoundUploadRecovery')
-    .select('soundId,sourceStoragePath,playableStoragePath,state')
+    .select('id,soundId,sourceStoragePath,playableStoragePath,state,nextAttemptAt,leaseExpiresAt,claimExpiresAt')
     .in('state', ['uploading', 'cleanup_pending'])
     .order('createdAt', { ascending: true })
     .limit(Math.min(Math.max(Math.trunc(limit), 1), 100));
   const rows = (assertSupabaseResult('list sound upload recoveries', result) ?? []) as Array<Record<string, unknown>>;
   return rows.map((row) => ({
+    id: row.id as string,
     soundId: row.soundId as string,
     sourceStoragePath: row.sourceStoragePath as string,
     playableStoragePath: row.playableStoragePath as string,
+    state: row.state as SoundUploadRecoveryCandidate['state'],
+    nextAttemptAt: (row.nextAttemptAt ?? row.next_attempt_at) as string,
+    leaseExpiresAt: (row.leaseExpiresAt ?? row.lease_expires_at) as string,
   }));
 }
 
 /** Reconciles uploads that were interrupted before their Sound row settled. */
 async function reconcileSoundUploadRecoveries(): Promise<{ processed: number; deferred: number }> {
-  const recoveries = await listPendingSoundUploadRecoveries();
+  const now = Date.now();
+  const candidates = await listPendingSoundUploadRecoveries();
   let processed = 0;
   let deferred = 0;
-  for (const recovery of recoveries) {
+  for (const candidate of candidates.filter((item) => isUploadRecoveryCandidate(item, now))) {
+    const claimToken = randomUUID();
     try {
-      if (await getSound(recovery.soundId)) {
-        await completeSoundUploadRecovery(recovery.soundId);
+      const recovery = await claimSoundUploadRecovery({ recoveryId: candidate.id, claimToken });
+      if (!recovery) continue;
+      const sound = await getSound(recovery.soundId);
+      if (sound) {
+        if (resolveUploadRecovery({
+          hasSoundRow: true,
+          soundPathsMatch: sound.sourceStoragePath === recovery.sourceStoragePath
+            && sound.storagePath === recovery.playableStoragePath,
+          sourceAbsent: false,
+          playableAbsent: false,
+        }) !== 'row_committed') {
+          throw new Error('Sound upload recovery row does not match its prepared paths.');
+        }
+        await completeSoundUploadRecovery({
+          soundId: recovery.soundId,
+          token: claimToken,
+          sourceStoragePath: recovery.sourceStoragePath,
+          playableStoragePath: recovery.playableStoragePath,
+          outcome: 'row_committed',
+        });
         processed += 1;
         continue;
       }
-      await deleteStorageObject(recovery.sourceStoragePath);
-      await deleteStorageObject(recovery.playableStoragePath);
-      await completeSoundUploadRecovery(recovery.soundId);
+      const deleteResults = await Promise.allSettled([
+        deleteStorageObject(recovery.sourceStoragePath),
+        deleteStorageObject(recovery.playableStoragePath),
+      ]);
+      if (deleteResults.some((result) => result.status === 'rejected')) {
+        throw new Error('Sound upload cleanup failed.');
+      }
+      const [sourceAbsent, playableAbsent] = await Promise.all([
+        confirmStorageObjectAbsent(recovery.sourceStoragePath),
+        confirmStorageObjectAbsent(recovery.playableStoragePath),
+      ]);
+      if (resolveUploadRecovery({
+        hasSoundRow: false,
+        soundPathsMatch: false,
+        sourceAbsent,
+        playableAbsent,
+      }) !== 'objects_absent') {
+        throw new Error('Sound upload cleanup could not be confirmed.');
+      }
+      await completeSoundUploadRecovery({
+        soundId: recovery.soundId,
+        token: claimToken,
+        sourceStoragePath: recovery.sourceStoragePath,
+        playableStoragePath: recovery.playableStoragePath,
+        outcome: 'objects_absent',
+      });
       processed += 1;
     } catch {
       deferred += 1;
+      await deferSoundUploadRecovery({
+        recoveryId: candidate.id,
+        claimToken,
+        lastError: 'Upload recovery cleanup could not be confirmed; retrying with a bounded backoff.',
+      }).catch(() => undefined);
     }
   }
   return { processed, deferred };
+}
+
+/** Confirms absence without treating an unknown provider error as cleanup success. */
+export async function confirmStorageObjectAbsent(path: string): Promise<boolean> {
+  try {
+    const result = await createAdminClient().storage.from(SOUND_BUCKET).download(path);
+    if (result.data) return false;
+    const error = result.error as { statusCode?: number; message?: string } | null;
+    return Boolean(error && (error.statusCode === 404 || /not found|does not exist/i.test(error.message ?? '')));
+  } catch {
+    return false;
+  }
 }
 
 async function storageObjectExists(path: string): Promise<boolean> {
