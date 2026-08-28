@@ -15,6 +15,7 @@ const NAV_LINKS = [
   { href: '/logs', label: 'Voice Logs' },
   { href: '/speak', label: 'Speak' },
   { href: '/music', label: 'Music' },
+  { href: '/soundboard', label: 'Soundboard' },
   { href: '/config', label: 'Settings' },
 ];
 

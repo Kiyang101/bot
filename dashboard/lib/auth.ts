@@ -21,10 +21,10 @@ export interface SessionUser {
   role: Role;
 }
 
-/** Pages each role is allowed to open. Members are confined to Speak + Music. */
+/** Pages each role is allowed to open. Soundboard is available to members and admins. */
 export const ROLE_PATHS: Record<Role, string[]> = {
-  admin: ["/", "/servers", "/logs", "/speak", "/music", "/soundboard", "/config"],
-  member: ["/servers", "/speak", "/music", "/soundboard"],
+  admin: ["/", "/servers", "/logs", "/speak", "/music", "/soundboard", "/soundboard/manage", "/config"],
+  member: ["/servers", "/speak", "/music", "/soundboard", "/soundboard/manage"],
 };
 
 /** Where to send a user after login / when they hit a page above their role. */
