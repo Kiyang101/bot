@@ -490,6 +490,48 @@ test('trim persists measured playable duration with the new immutable storage pa
   });
 });
 
+test('trim retries superseded clip cleanup and reports a sanitized warning when it remains unavailable', async () => {
+  let cleanupAttempts = 0;
+  const actions = createSoundboardActions(createDependencies({
+    downloadSource: async () => new Blob([new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+    ])]),
+    uploadPlayableClip: async () => 'sounds/member-1/sound-own/playable-version-2',
+    trimSourceFile: async () => ({ buffer: Buffer.from('clip'), durationSec: 0.41, sourceDurationSec: 1 }),
+    deleteStorageObject: async () => {
+      cleanupAttempts += 1;
+      throw new Error('storage path leaked in provider response');
+    },
+    updateSound: async (_id, input) => ({ ...ownSound, ...input }),
+  }));
+
+  const result = await actions.trimSound({ soundId: ownSound.id, trimStartMs: 100, trimEndMs: 500 });
+
+  assert.equal(result.ok, true);
+  assert.equal(cleanupAttempts, 3);
+  assert.equal('warning' in result, true);
+  assert.match('warning' in result ? result.warning ?? '' : '', /cleanup/i);
+  assert.doesNotMatch(JSON.stringify(result), /sounds\//);
+});
+
+test('delete retries staging cleanup and reports a sanitized warning after the row is removed', async () => {
+  let discardAttempts = 0;
+  const actions = createSoundboardActions(createDependencies({
+    discardSoundFileStage: async () => {
+      discardAttempts += 1;
+      throw new Error('private staging path should not be exposed');
+    },
+  }));
+
+  const result = await actions.deleteSound(ownSound.id);
+
+  assert.equal(result.ok, true);
+  assert.equal(discardAttempts, 3);
+  assert.equal('warning' in result, true);
+  assert.match('warning' in result ? result.warning ?? '' : '', /cleanup/i);
+  assert.doesNotMatch(JSON.stringify(result), /sounds\//);
+});
+
 test('duplicate shortcuts are rejected before mutation and identify the conflicting sound', async () => {
   let updated = false;
   const conflict = { ...otherSound, name: 'Airhorn', shortcut: 'k' };

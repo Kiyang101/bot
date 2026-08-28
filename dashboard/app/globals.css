@@ -928,6 +928,15 @@ button.danger:hover { opacity: 0.9; }
   color: #ff8e90;
   font-size: 14px;
 }
+.sound-warning {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(250, 166, 26, .45);
+  border-radius: 9px;
+  background: rgba(250, 166, 26, .09);
+  color: #ffd27a;
+  font-size: 14px;
+}
 .sound-empty { padding: 44px 20px; border: 1px dashed var(--border); border-radius: 10px; text-align: center; }
 .sound-empty h3 { margin: 0 0 6px; }
 .sound-empty p { margin: 0 0 18px; color: var(--muted); }

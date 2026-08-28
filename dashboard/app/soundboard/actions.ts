@@ -15,7 +15,9 @@ import { SoundboardBusyError, type SoundboardPlayPayload } from '../../lib/contr
 import { detectSupportedAudioMimeType } from '../../lib/audio';
 
 export type SoundboardSound = Omit<SoundRecord, 'storagePath' | 'sourceStoragePath'>;
-export type SoundboardActionResult<T = undefined> = SoundMutationResult<T> | { ok: true; value?: T };
+export type SoundboardActionResult<T = undefined> =
+  | { ok: true; value?: T; warning?: string }
+  | { ok: false; message: string; warning?: string };
 
 export interface SoundboardData {
   user: Pick<SessionUser, 'id' | 'username' | 'role'>;
@@ -100,6 +102,9 @@ const PUBLIC_PROCESSING_MESSAGES = new Set([
   'Trim range must fit inside the source duration.',
   'Sound clips must be at least 100 ms long.',
 ]);
+const CLEANUP_RETRY_ATTEMPTS = 3;
+const CLEANUP_WARNING = 'Audio cleanup could not be completed. Please retry or contact an administrator.';
+const DELETE_CLEANUP_WARNING = 'Sound deleted, but temporary cleanup could not be completed. An administrator can retry cleanup.';
 
 function actionError(error: unknown, fallback: string): SoundMutationResult {
   if (error instanceof SoundboardBusyError) return { ok: false, message: error.message };
@@ -107,6 +112,22 @@ function actionError(error: unknown, fallback: string): SoundMutationResult {
     return { ok: false, message: error.message };
   }
   return { ok: false, message: fallback };
+}
+
+async function retryCleanup(cleanup: () => Promise<void>): Promise<boolean> {
+  for (let attempt = 0; attempt < CLEANUP_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      await cleanup();
+      return true;
+    } catch {
+      // Return a sanitized warning after bounded retries; provider details stay server-side.
+    }
+  }
+  return false;
+}
+
+function addWarning<T>(result: SoundboardActionResult<T>, warning: string | null): SoundboardActionResult<T> {
+  return warning ? { ...result, warning } : result;
 }
 
 async function requireUser(dependencies: SoundboardActionDependencies): Promise<SessionUser | null> {
@@ -358,12 +379,13 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         revalidateSoundboard(dependencies);
         return { ok: true, value: asClientSound(sound) };
       } catch (error) {
+        let cleanupWarning: string | null = null;
         for (const path of uploadedPaths.reverse()) {
-          await dependencies.deleteStorageObject(path).catch(() => undefined);
+          if (!await retryCleanup(() => dependencies.deleteStorageObject(path))) cleanupWarning = CLEANUP_WARNING;
         }
         const race = await shortcutRaceResult(dependencies, error, metadata.value.shortcut);
-        if (race) return race;
-        return actionError(error, 'Failed to upload sound.');
+        if (race) return addWarning(race, cleanupWarning);
+        return addWarning(actionError(error, 'Failed to upload sound.'), cleanupWarning);
       }
     },
 
@@ -431,12 +453,18 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           durationSec: clip.durationSec,
         });
         stagedPlayablePath = null;
-        await dependencies.deleteStorageObject(sound.storagePath).catch(() => undefined);
+        const previousClipDeleted = await retryCleanup(() => dependencies.deleteStorageObject(sound.storagePath));
         revalidateSoundboard(dependencies);
-        return { ok: true, value: asClientSound(updated) };
+        return {
+          ok: true,
+          value: asClientSound(updated),
+          ...(previousClipDeleted ? {} : { warning: DELETE_CLEANUP_WARNING }),
+        };
       } catch (error) {
-        if (stagedPlayablePath) await dependencies.deleteStorageObject(stagedPlayablePath).catch(() => undefined);
-        return actionError(error, 'Failed to trim sound.');
+        const cleanupWarning = stagedPlayablePath && !await retryCleanup(
+          () => dependencies.deleteStorageObject(stagedPlayablePath!),
+        ) ? CLEANUP_WARNING : null;
+        return addWarning(actionError(error, 'Failed to trim sound.'), cleanupWarning);
       }
     },
 
@@ -477,6 +505,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       if (!id) return { ok: false, message: 'Sound id is required.' };
 
       let stage: SoundFileDeletionStage | null = null;
+      let rowDeleted = false;
       try {
         const sound = await dependencies.getSound(id);
         if (!sound) return { ok: false, message: 'Sound not found.' };
@@ -485,16 +514,22 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         stage = await dependencies.stageSoundFilesForDeletion({ sound, stageId: dependencies.createSoundId() });
         await dependencies.deleteSoundFiles(stage);
         await dependencies.deleteSoundRow(sound.id);
-        await dependencies.discardSoundFileStage(stage).catch(() => undefined);
+        rowDeleted = true;
+        if (!await retryCleanup(() => dependencies.discardSoundFileStage(stage!))) {
+          revalidateSoundboard(dependencies);
+          return { ok: true, warning: DELETE_CLEANUP_WARNING };
+        }
         revalidateSoundboard(dependencies);
         return { ok: true };
       } catch (error) {
-        if (stage) {
-          try {
-            await dependencies.restoreSoundFiles(stage);
-            await dependencies.discardSoundFileStage(stage).catch(() => undefined);
-          } catch {
-            return { ok: false, message: 'Failed to delete sound. Recovery copies were retained for an administrator.' };
+        if (stage && !rowDeleted) {
+          const restored = await retryCleanup(() => dependencies.restoreSoundFiles(stage!));
+          if (!restored) {
+            return { ok: false, message: 'Failed to delete sound.', warning: CLEANUP_WARNING };
+          }
+          const stageDiscarded = await retryCleanup(() => dependencies.discardSoundFileStage(stage!));
+          if (!stageDiscarded) {
+            return { ok: false, message: 'Failed to delete sound.', warning: CLEANUP_WARNING };
           }
         }
         return actionError(error, 'Failed to delete sound.');

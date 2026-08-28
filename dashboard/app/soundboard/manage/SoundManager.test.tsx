@@ -48,6 +48,17 @@ const otherSound: ManagedSound = {
   sourcePreviewUrl: null,
 };
 
+const thirdSound: ManagedSound = {
+  ...ownSound,
+  id: 'sound-third',
+  name: 'Cheer',
+  uploadedById: 'user-3',
+  uploadedByName: 'Nina',
+  shortcut: null,
+  sortOrder: 2,
+  previewUrl: 'https://signed.example/third-playable',
+};
+
 function successfulActions(overrides: Partial<SoundManagerActions> = {}): SoundManagerActions {
   return {
     uploadSound: vi.fn(async () => ({ ok: true as const, value: ownSound as SoundboardSound })),
@@ -120,6 +131,25 @@ describe('SoundManager', () => {
 
     await screen.findByLabelText('Audio waveform');
     expect(actions.getSoundSourceUrl).toHaveBeenCalledWith('sound-own');
+  });
+
+  test('does not install a stale source URL after selecting another sound', async () => {
+    const sourceResolvers = new Map<string, (result: SoundboardActionResult<string>) => void>();
+    const actions = successfulActions({
+      getSoundSourceUrl: vi.fn((soundId): Promise<SoundboardActionResult<string>> => new Promise((resolve) => {
+        sourceResolvers.set(soundId, resolve);
+      })),
+    });
+    render(<SoundManager initialSounds={[ownSound, otherSound]} currentUser={{ id: 'admin-1', role: 'admin' }} actions={actions} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Launch horn' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Airhorn' }));
+    sourceResolvers.get('sound-own')?.({ ok: true, value: 'blob:stale-source' });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(screen.queryByLabelText('Audio waveform')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Airhorn', level: 2 })).toBeInTheDocument();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:stale-source');
   });
 
   test('uses a signed generated playable URL after upload instead of a local source URL', async () => {
@@ -203,6 +233,19 @@ describe('SoundManager', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete sound' }));
 
     await waitFor(() => expect(screen.getByTestId('sound-row-sound-other')).toHaveFocus());
+  });
+
+  test('focuses the next surviving row after deleting a non-edited sound', async () => {
+    const actions = successfulActions();
+    render(<SoundManager initialSounds={[ownSound, otherSound, thirdSound]} currentUser={{ id: 'admin-1', role: 'admin' }} actions={actions} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Launch horn' }));
+    await screen.findByLabelText('Audio waveform');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Airhorn' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete sound' }));
+
+    await waitFor(() => expect(screen.getByTestId('sound-row-sound-third')).toHaveFocus());
+    expect(within(screen.getByTestId('sound-row-sound-own')).getByRole('heading', { name: 'Launch horn' })).toBeInTheDocument();
   });
 
   test('keeps delete retryable when the server action rejects', async () => {

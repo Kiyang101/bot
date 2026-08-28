@@ -60,6 +60,12 @@ interface EditorMetadata {
   fadeOutMs: number;
 }
 
+type FocusAfterDelete = string | 'upload';
+
+function revokeObjectUrl(url: string | null): void {
+  if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
+}
+
 function metadataForSound(sound: SoundboardSound): EditorMetadata {
   return {
     name: sound.name,
@@ -248,16 +254,25 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
   const [announcement, setAnnouncement] = useState('');
   const [dragActive, setDragActive] = useState(false);
   const [previewingId, setPreviewingId] = useState<string | null>(null);
-  const [focusAfterDeleteId, setFocusAfterDeleteId] = useState<string | null>(null);
+  const [focusAfterDeleteId, setFocusAfterDeleteId] = useState<FocusAfterDelete | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadTriggerRef = useRef<HTMLButtonElement>(null);
   const rowRefs = useRef(new Map<string, HTMLElement>());
   const refreshingPreviewIdsRef = useRef(new Set<string>());
+  const editingSelectionRef = useRef<{ id: string | null; token: number }>({ id: null, token: 0 });
+  const editingSourceUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!focusAfterDeleteId) return;
-    rowRefs.current.get(focusAfterDeleteId)?.focus();
+    if (focusAfterDeleteId === 'upload') uploadTriggerRef.current?.focus();
+    else rowRefs.current.get(focusAfterDeleteId)?.focus();
     setFocusAfterDeleteId(null);
   }, [focusAfterDeleteId, sounds]);
+
+  useEffect(() => () => {
+    revokeObjectUrl(editingSourceUrlRef.current);
+  }, []);
 
   const categories = useMemo(() => Array.from(new Set([
     ...DEFAULT_CATEGORIES,
@@ -274,15 +289,33 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
     return pendingActions.has(key);
   }
 
+  function replaceEditingSourceUrl(url: string | null): void {
+    const previousUrl = editingSourceUrlRef.current;
+    if (previousUrl !== url) revokeObjectUrl(previousUrl);
+    editingSourceUrlRef.current = url;
+    setEditingSourceUrl(url);
+  }
+
+  function closeEditor(): void {
+    editingSelectionRef.current = { id: null, token: editingSelectionRef.current.token + 1 };
+    replaceEditingSourceUrl(null);
+    setEditingId(null);
+    setEditMetadata(null);
+    setEditRange(null);
+  }
+
   async function runAction<T>(
     pendingKey: string,
     failureMessage: string,
     action: () => Promise<SoundboardActionResult<T>>,
   ): Promise<SoundboardActionResult<T> | null> {
     setError(null);
+    setWarning(null);
     setPendingActions((current) => new Set(current).add(pendingKey));
     try {
-      return await action();
+      const result = await action();
+      if (result.warning) setWarning(result.warning);
+      return result;
     } catch {
       setError(failureMessage);
       return null;
@@ -387,10 +420,12 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
   }
 
   async function beginEditing(sound: ManagedSound) {
+    const request = { id: sound.id, token: editingSelectionRef.current.token + 1 };
+    editingSelectionRef.current = request;
     setError(null);
     setConfirmingDeleteId(null);
     setEditingId(sound.id);
-    setEditingSourceUrl(null);
+    replaceEditingSourceUrl(null);
     setEditMetadata(metadataForSound(sound));
     setEditRange({
       startMs: sound.trimStartMs,
@@ -403,11 +438,16 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       () => actions.getSoundSourceUrl(sound.id),
     );
     if (!sourceResult) return;
+    const sourceUrl = resultValue(sourceResult);
+    if (editingSelectionRef.current.id !== request.id || editingSelectionRef.current.token !== request.token) {
+      revokeObjectUrl(sourceUrl);
+      return;
+    }
     if (!sourceResult.ok) {
       setError(sourceResult.message);
       return;
     }
-    setEditingSourceUrl(resultValue(sourceResult));
+    replaceEditingSourceUrl(sourceUrl);
   }
 
   async function saveMetadata(event: FormEvent<HTMLFormElement>) {
@@ -465,15 +505,14 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       return;
     }
     const remaining = sounds.filter((candidate) => candidate.id !== sound.id);
+    const deletedIndex = sounds.findIndex((candidate) => candidate.id === sound.id);
+    const focusTarget = remaining[deletedIndex] ?? remaining[deletedIndex - 1] ?? null;
     setSounds(remaining);
     setConfirmingDeleteId(null);
     if (editingId === sound.id) {
-      setEditingId(null);
-      setEditMetadata(null);
-      setEditRange(null);
-      setEditingSourceUrl(null);
-      setFocusAfterDeleteId(remaining[0]?.id ?? null);
+      closeEditor();
     }
+    setFocusAfterDeleteId(focusTarget?.id ?? 'upload');
     setAnnouncement(`${sound.name} deleted.`);
   }
 
@@ -502,7 +541,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
           <h1>Sound management</h1>
           <p className="sub">Shape short clips for every server, then assign them to the shared board.</p>
         </div>
-        <button type="button" onClick={() => fileInputRef.current?.click()}>Upload sound</button>
+        <button ref={uploadTriggerRef} type="button" onClick={() => fileInputRef.current?.click()}>Upload sound</button>
       </div>
 
       <form className="sound-upload-panel" onSubmit={(event) => void handleUpload(event)} aria-busy={isPending('upload')}>
@@ -554,6 +593,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       </form>
 
       {error && <p className="sound-error" role="alert">{error}</p>}
+      {warning && <p className="sound-warning" role="status">{warning}</p>}
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</div>
 
       {editingSound && editMetadata && (
@@ -567,7 +607,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
               <p className="sound-manager-eyebrow">Editing source</p>
               <h2 id="sound-edit-title">{editingSound.name}</h2>
             </div>
-            <button type="button" className="secondary" onClick={() => setEditingId(null)}>Close editor</button>
+            <button type="button" className="secondary" onClick={closeEditor}>Close editor</button>
           </div>
           <div className="sound-editor-panel">
             <form className="sound-metadata-form" onSubmit={(event) => void saveMetadata(event)}>
@@ -617,7 +657,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
           <div className="sound-empty">
             <h3>No sounds yet</h3>
             <p>Upload the first sound to make it available across every server.</p>
-            <button type="button" onClick={() => fileInputRef.current?.click()}>Upload the first sound</button>
+            <button ref={uploadTriggerRef} type="button" onClick={() => fileInputRef.current?.click()}>Upload the first sound</button>
           </div>
         ) : (
           <div className="sound-library-list">
