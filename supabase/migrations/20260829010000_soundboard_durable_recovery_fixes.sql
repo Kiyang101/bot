@@ -86,6 +86,115 @@ ALTER TABLE public."SoundMutationRecovery"
     )
   );
 
+-- Existing delete intents can recover their MIME while the Sound row still
+-- exists. A post-row-delete intent without MIME is retained for manual review
+-- rather than restoring with a guessed format.
+UPDATE public."SoundMutationRecovery" AS recovery
+SET "sourceMimeType" = sound."mimeType"
+FROM public."Sound" AS sound
+WHERE recovery."soundId" = sound.id
+  AND recovery.operation = 'delete'
+  AND recovery."sourceMimeType" IS NULL;
+
+UPDATE public."SoundMutationRecovery"
+SET state = 'manual_required',
+    "lastError" = 'Delete recovery has no original source MIME type.'
+WHERE operation = 'delete'
+  AND "sourceMimeType" IS NULL
+  AND state IN ('delete_staging', 'delete_ready', 'delete_objects_removed', 'restore_pending');
+
+-- Uploads have no Sound row to anchor recovery until both Storage objects have
+-- been written. Persist deterministic paths before the first upload so a
+-- process crash cannot make an orphaned object undiscoverable.
+CREATE TABLE IF NOT EXISTS public."SoundUploadRecovery" (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "soundId" uuid NOT NULL UNIQUE,
+  "uploadedById" text NOT NULL,
+  "sourceStoragePath" text NOT NULL,
+  "playableStoragePath" text NOT NULL,
+  state text NOT NULL CHECK (state IN ('uploading', 'cleanup_pending')),
+  attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  "nextAttemptAt" timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "lastError" text,
+  "createdAt" timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "SoundUploadRecovery_paths_contract" CHECK (
+    "sourceStoragePath" ~ '^sounds/[^/]+/[^/]+/source$'
+    AND "playableStoragePath" ~ '^sounds/[^/]+/[^/]+/playable-[^/]+$'
+  )
+);
+
+ALTER TABLE public."SoundUploadRecovery" ENABLE ROW LEVEL SECURITY;
+GRANT ALL ON public."SoundUploadRecovery" TO service_role;
+
+CREATE INDEX IF NOT EXISTS "SoundUploadRecovery_due_idx"
+  ON public."SoundUploadRecovery" (state, "nextAttemptAt", "createdAt");
+
+CREATE OR REPLACE FUNCTION public.prepare_sound_upload_recovery(
+  p_sound_id uuid,
+  p_uploaded_by_id text,
+  p_source_path text,
+  p_playable_path text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  IF p_uploaded_by_id IS NULL OR p_uploaded_by_id = '' OR p_uploaded_by_id ~ '[/\\]'
+     OR p_source_path <> 'sounds/' || p_uploaded_by_id || '/' || p_sound_id::text || '/source'
+     OR p_playable_path !~ ('^sounds/' || p_uploaded_by_id || '/' || p_sound_id::text || '/playable-[^/]+$') THEN
+    RETURN false;
+  END IF;
+
+  INSERT INTO public."SoundUploadRecovery" (
+    "soundId", "uploadedById", "sourceStoragePath", "playableStoragePath", state
+  ) VALUES (
+    p_sound_id, p_uploaded_by_id, p_source_path, p_playable_path, 'uploading'
+  );
+  RETURN true;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.mark_sound_upload_recovery_pending(
+  p_sound_id uuid,
+  p_last_error text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE public."SoundUploadRecovery"
+  SET state = 'cleanup_pending',
+      "lastError" = p_last_error,
+      "updatedAt" = CURRENT_TIMESTAMP
+  WHERE "soundId" = p_sound_id;
+  RETURN FOUND;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.complete_sound_upload_recovery(
+  p_sound_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  DELETE FROM public."SoundUploadRecovery"
+  WHERE "soundId" = p_sound_id;
+  RETURN FOUND;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.prepare_sound_upload_recovery(uuid, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.mark_sound_upload_recovery_pending(uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.complete_sound_upload_recovery(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.prepare_sound_upload_recovery(uuid, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.mark_sound_upload_recovery_pending(uuid, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.complete_sound_upload_recovery(uuid) TO service_role;
+
 DROP INDEX IF EXISTS "SoundMutationRecovery_active_sound_key";
 CREATE UNIQUE INDEX "SoundMutationRecovery_active_sound_key"
   ON public."SoundMutationRecovery" ("soundId")
@@ -161,7 +270,38 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.prepare_sound_trim_mutation(uuid, uuid, bigint, uuid, text);
+-- Keep the five-argument overload during the rolling compatibility window.
+-- It validates the old call's lease and path but returns false because the old
+-- payload cannot establish the complete replay intent required for recovery.
+CREATE OR REPLACE FUNCTION public.prepare_sound_trim_mutation(
+  p_sound_id uuid,
+  p_token uuid,
+  p_expected_version bigint,
+  p_version_id uuid,
+  p_previous_playable_path text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public."Sound" AS sound
+    JOIN public."SoundMutationLease" AS lease ON lease."soundId" = sound.id
+    WHERE sound.id = p_sound_id
+      AND lease.token = p_token
+      AND lease.operation = 'trim'
+      AND lease."expiresAt" > CURRENT_TIMESTAMP
+      AND sound."mutationVersion" = p_expected_version
+      AND sound."storagePath" = p_previous_playable_path
+  ) THEN
+    RETURN false;
+  END IF;
+  RETURN false;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.prepare_sound_trim_mutation(
   p_sound_id uuid,
   p_token uuid,
@@ -228,6 +368,68 @@ BEGIN
     p_source_mime_type, p_generated_mime_type, p_source_size_bytes, p_generated_size_bytes
   );
   RETURN jsonb_build_object('prepared', true, 'generated_storage_path', p_generated_path);
+END;
+$$;
+
+DROP FUNCTION IF EXISTS public.prepare_sound_delete_mutation(uuid, uuid, bigint, text, text, text, text);
+CREATE OR REPLACE FUNCTION public.prepare_sound_delete_mutation(
+  p_sound_id uuid,
+  p_token uuid,
+  p_expected_version bigint,
+  p_stage_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  owner_id text;
+  source_path text;
+  playable_path text;
+  source_mime_type text;
+  expected_source_path text;
+  expected_playable_prefix text;
+  staged_source_path text;
+  staged_playable_path text;
+BEGIN
+  IF p_stage_id IS NULL THEN
+    RETURN false;
+  END IF;
+
+  SELECT sound."uploadedById", sound."sourceStoragePath", sound."storagePath", sound."mimeType"
+  INTO owner_id, source_path, playable_path, source_mime_type
+  FROM public."Sound" AS sound
+  JOIN public."SoundMutationLease" AS lease ON lease."soundId" = sound.id
+  WHERE sound.id = p_sound_id
+    AND lease.token = p_token
+    AND lease.operation = 'delete'
+    AND lease."expiresAt" > CURRENT_TIMESTAMP
+    AND sound."mutationVersion" = p_expected_version;
+
+  expected_source_path := 'sounds/' || owner_id || '/' || p_sound_id::text || '/source';
+  expected_playable_prefix := 'sounds/' || owner_id || '/' || p_sound_id::text || '/playable';
+  IF owner_id IS NULL
+     OR source_path IS NULL
+     OR playable_path IS NULL
+     OR source_mime_type IS NULL
+     OR source_mime_type NOT IN ('audio/mpeg', 'audio/wav', 'audio/ogg')
+     OR source_path <> expected_source_path
+     OR (playable_path <> expected_playable_prefix
+         AND (left(playable_path, length(expected_playable_prefix) + 1) <> expected_playable_prefix || '-'
+              OR position('/' IN substring(playable_path FROM length(expected_playable_prefix) + 2)) > 0)) THEN
+    RETURN false;
+  END IF;
+
+  staged_source_path := 'sounds/' || owner_id || '/' || p_sound_id::text || '/staging/' || p_stage_id || '/source';
+  staged_playable_path := 'sounds/' || owner_id || '/' || p_sound_id::text || '/staging/' || p_stage_id || '/playable';
+  INSERT INTO public."SoundMutationRecovery" (
+    "soundId", token, operation, state, "expectedVersion", "sourceMimeType",
+    "sourceStoragePath", "playableStoragePath", "stagedSourcePath", "stagedPlayablePath"
+  ) VALUES (
+    p_sound_id, p_token, 'delete', 'delete_staging', p_expected_version, source_mime_type,
+    source_path, playable_path, staged_source_path, staged_playable_path
+  );
+  RETURN true;
 END;
 $$;
 
@@ -470,12 +672,16 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.prepare_sound_trim_mutation(uuid, uuid, bigint, uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.prepare_sound_trim_mutation(uuid, uuid, bigint, uuid, text, text, integer, integer, numeric, numeric, text, text, bigint, bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.prepare_sound_delete_mutation(uuid, uuid, bigint, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.mark_sound_mutation_recovery(uuid, uuid, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.complete_sound_mutation_recovery(uuid, uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.claim_sound_mutation_recovery(uuid, uuid, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.defer_sound_mutation_recovery(uuid, uuid, text, text, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.prepare_sound_trim_mutation(uuid, uuid, bigint, uuid, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.prepare_sound_trim_mutation(uuid, uuid, bigint, uuid, text, text, integer, integer, numeric, numeric, text, text, bigint, bigint) TO service_role;
+GRANT EXECUTE ON FUNCTION public.prepare_sound_delete_mutation(uuid, uuid, bigint, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.mark_sound_mutation_recovery(uuid, uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_sound_mutation_recovery(uuid, uuid, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_sound_mutation_recovery(uuid, uuid, integer) TO service_role;

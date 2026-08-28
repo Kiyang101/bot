@@ -63,6 +63,9 @@ function createDependencies(overrides: Partial<SoundboardActionDependencies> = {
     prepareSoundTrimMutation: async () => undefined,
     markSoundMutationRecovery: async () => undefined,
     completeSoundMutationRecovery: async () => undefined,
+    prepareSoundUploadRecovery: async () => undefined,
+    markSoundUploadRecoveryPending: async () => undefined,
+    completeSoundUploadRecovery: async () => undefined,
     commitSoundTrim: async (input) => {
       const update = overrides.updateSound ?? (async () => ownSound);
       return update(input.soundId, {
@@ -294,6 +297,57 @@ test('upload rejects unsupported source bytes forged with an allowed MIME label 
   assert.equal(playableUploaded, false);
 });
 
+test('upload persists cleanup intent before uploads and keeps paths recoverable when cleanup also fails', async () => {
+  const events: string[] = [];
+  let uploadIntent: Record<string, unknown> | null = null;
+  const sourcePath = 'sounds/member-1/sound-new/source';
+  const playablePath = 'sounds/member-1/sound-new/playable-sound-new';
+  const wav = new Uint8Array([
+    0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+  ]);
+  const actions = createSoundboardActions(createDependencies({
+    prepareSoundUploadRecovery: async (input) => {
+      events.push('prepare');
+      uploadIntent = input as unknown as Record<string, unknown>;
+    },
+    uploadSource: async () => {
+      events.push('source-upload');
+      return sourcePath;
+    },
+    uploadPlayableClip: async () => {
+      events.push('playable-upload');
+      return playablePath;
+    },
+    insertSound: async () => { throw new Error('database unavailable'); },
+    deleteStorageObject: async () => { throw new Error('storage unavailable'); },
+    enqueueSoundCleanup: async () => { throw new Error('cleanup queue unavailable'); },
+    trimSourceFile: async () => ({ buffer: Buffer.from('clip'), durationSec: 0.4, sourceDurationSec: 1 }),
+  }));
+
+  const result = await actions.uploadSound({
+    name: 'Recoverable', category: 'Reactions', color: '#5865f2', shortcut: null,
+    gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
+    file: { type: 'audio/wav', size: wav.byteLength, arrayBuffer: async () => wav.buffer },
+    trimStartMs: 0,
+    trimEndMs: 500,
+  });
+
+  assert.deepEqual(events, ['prepare', 'source-upload', 'playable-upload']);
+  assert.deepEqual(uploadIntent, {
+    soundId: 'sound-new',
+    uploadedById: 'member-1',
+    sourceStoragePath: sourcePath,
+    playableStoragePath: playablePath,
+  });
+  assert.deepEqual(result, {
+    ok: false,
+    message: 'Failed to upload sound.',
+    warning: 'Audio cleanup could not be completed. Please retry or contact an administrator.',
+    recoveryRequired: true,
+  });
+  assert.doesNotMatch(JSON.stringify(result), /sounds\//);
+});
+
 test('upload rejects ID3-prefixed unsupported data before processing or storage', async () => {
   const id3Only = new Uint8Array([
     0x49, 0x44, 0x33,
@@ -474,10 +528,23 @@ test('a busy control response becomes a typed soundboard busy error', async () =
 test('delete restores both storage objects when deleting the database row fails', async () => {
   let filesPresent = true;
   let restored = false;
+  let restoredMime: string | null = null;
   const actions = createSoundboardActions(createDependencies({
+    getSound: async () => ({ ...ownSound, mimeType: 'audio/ogg' }),
+    stageSoundFilesForDeletion: async ({ sound }) => ({
+      sourceStoragePath: sound.sourceStoragePath,
+      playableStoragePath: sound.storagePath,
+      stagedSourcePath: 'sounds/member-1/sound-own/staging/delete-stage/source',
+      stagedPlayablePath: 'sounds/member-1/sound-own/staging/delete-stage/playable',
+      sourceMimeType: sound.mimeType,
+    }),
     deleteSoundFiles: async () => { filesPresent = false; },
     deleteSoundRow: async () => { throw new Error('database unavailable'); },
-    restoreSoundFiles: async () => { filesPresent = true; restored = true; },
+    restoreSoundFiles: async (stage) => {
+      filesPresent = true;
+      restored = true;
+      restoredMime = stage.sourceMimeType;
+    },
   }));
 
   const result = await actions.deleteSound(ownSound.id);
@@ -485,6 +552,7 @@ test('delete restores both storage objects when deleting the database row fails'
   assert.deepEqual(result, { ok: false, message: 'Failed to delete sound.' });
   assert.equal(restored, true);
   assert.equal(filesPresent, true);
+  assert.equal(restoredMime, 'audio/ogg');
 });
 
 test('delete restores staged files and leaves the row when storage deletion fails', async () => {

@@ -77,6 +77,14 @@ export interface SoundboardActionDependencies {
   getSignedSoundUrl: (path: string) => Promise<string>;
   uploadSource: (input: { uploadedById: string; soundId: string; file: ArrayBuffer; mimeType: string }) => Promise<string>;
   uploadPlayableClip: (input: { uploadedById: string; soundId: string; file: Uint8Array; mimeType?: string; versionId: string }) => Promise<string>;
+  prepareSoundUploadRecovery: (input: {
+    soundId: string;
+    uploadedById: string;
+    sourceStoragePath: string;
+    playableStoragePath: string;
+  }) => Promise<void>;
+  markSoundUploadRecoveryPending: (input: { soundId: string; lastError: string }) => Promise<void>;
+  completeSoundUploadRecovery: (soundId: string) => Promise<void>;
   deleteStorageObject: (path: string) => Promise<void>;
   downloadSource: (input: { uploadedById: string; soundId: string }) => Promise<Blob>;
   stageSoundFilesForDeletion: (input: {
@@ -497,6 +505,10 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
 
       const soundId = dependencies.createSoundId();
       const uploadedPaths: string[] = [];
+      let uploadRecoveryPrepared = false;
+      const playableVersionId = dependencies.createSoundId();
+      const expectedSourceStoragePath = `sounds/${user.id}/${soundId}/source`;
+      const expectedPlayableStoragePath = `sounds/${user.id}/${soundId}/playable-${playableVersionId}`;
       try {
         const source = await file.arrayBuffer();
         const actualMeta = validateUploadMeta(metadata.value.name, file.type, source.byteLength);
@@ -511,26 +523,33 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           trimStartMs: trim.value.trimStartMs,
           trimEndMs: trim.value.trimEndMs,
         });
-        const sourceStoragePath = await dependencies.uploadSource({
+        await dependencies.prepareSoundUploadRecovery({
+          soundId,
+          uploadedById: user.id,
+          sourceStoragePath: expectedSourceStoragePath,
+          playableStoragePath: expectedPlayableStoragePath,
+        });
+        uploadRecoveryPrepared = true;
+        const uploadedSourceStoragePath = await dependencies.uploadSource({
           uploadedById: user.id,
           soundId,
           file: source,
           mimeType: sourceMimeType,
         });
-        uploadedPaths.push(sourceStoragePath);
+        uploadedPaths.push(uploadedSourceStoragePath);
         const storagePath = await dependencies.uploadPlayableClip({
           uploadedById: user.id,
           soundId,
           file: clip.buffer,
           mimeType: 'audio/wav',
-          versionId: dependencies.createSoundId(),
+          versionId: playableVersionId,
         });
         uploadedPaths.push(storagePath);
         const sound = await dependencies.insertSound({
           id: soundId,
           ...metadata.value,
           storagePath,
-          sourceStoragePath,
+          sourceStoragePath: uploadedSourceStoragePath,
           mimeType: sourceMimeType,
           sizeBytes: source.byteLength,
           durationSec: clip.durationSec,
@@ -540,19 +559,52 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           trimEndMs: trim.value.trimEndMs,
           sortOrder: 0,
         });
+        try {
+          if (uploadRecoveryPrepared) await dependencies.completeSoundUploadRecovery(soundId);
+        } catch {
+          revalidateSoundboard(dependencies);
+          return {
+            ok: true,
+            value: asClientSound(sound),
+            warning: CLEANUP_WARNING,
+            recoveryRequired: true,
+          };
+        }
         revalidateSoundboard(dependencies);
         return { ok: true, value: asClientSound(sound) };
       } catch (error) {
         let cleanupWarning: string | null = null;
         let recoveryRequired = false;
+        let cleanupPending = false;
+        if (uploadRecoveryPrepared) {
+          try {
+            await dependencies.markSoundUploadRecoveryPending({
+              soundId,
+              lastError: 'Sound row insertion or upload failed; uploaded objects require cleanup.',
+            });
+          } catch {
+            recoveryRequired = true;
+          }
+        }
         for (const path of uploadedPaths.reverse()) {
           const cleanup = await cleanupWithRecovery(
             dependencies,
             { soundId, objectPath: path, cleanupKind: 'delete_object' },
             () => dependencies.deleteStorageObject(path),
           );
-          if (!cleanup.cleaned) cleanupWarning = CLEANUP_WARNING;
+          if (!cleanup.cleaned) {
+            cleanupWarning = CLEANUP_WARNING;
+            cleanupPending = true;
+          }
           recoveryRequired ||= cleanup.recoveryRequired;
+        }
+        if (uploadRecoveryPrepared && uploadedPaths.length === 0) recoveryRequired = true;
+        if (uploadRecoveryPrepared && uploadedPaths.length > 0 && !cleanupPending && !recoveryRequired) {
+          try {
+            await dependencies.completeSoundUploadRecovery(soundId);
+          } catch {
+            recoveryRequired = true;
+          }
         }
         const race = await shortcutRaceResult(dependencies, error, metadata.value.shortcut);
         if (race) return addRecoveryRequired(addWarning(race, cleanupWarning), recoveryRequired);
@@ -987,6 +1039,9 @@ async function loadDefaultDependencies(): Promise<SoundboardActionDependencies> 
     getSignedSoundUrl: sounds.getSignedSoundUrl,
     uploadSource: sounds.uploadSource,
     uploadPlayableClip: sounds.uploadPlayableClip,
+    prepareSoundUploadRecovery: sounds.prepareSoundUploadRecovery,
+    markSoundUploadRecoveryPending: sounds.markSoundUploadRecoveryPending,
+    completeSoundUploadRecovery: sounds.completeSoundUploadRecovery,
     deleteStorageObject: sounds.deleteStorageObject,
     downloadSource: sounds.downloadSource,
     stageSoundFilesForDeletion: sounds.stageSoundFilesForDeletion,

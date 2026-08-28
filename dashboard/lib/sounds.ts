@@ -214,6 +214,50 @@ export async function releaseSoundMutation(input: { soundId: string; token: stri
   );
 }
 
+/** Persists deterministic upload cleanup paths before either object is uploaded. */
+export async function prepareSoundUploadRecovery(input: {
+  soundId: string;
+  uploadedById: string;
+  sourceStoragePath: string;
+  playableStoragePath: string;
+}): Promise<void> {
+  if (!isSoundPath(input.sourceStoragePath) || !isSoundPath(input.playableStoragePath)) {
+    throw new Error('Sound upload recovery paths are invalid.');
+  }
+  const result = await createAdminClient().rpc('prepare_sound_upload_recovery', {
+    p_sound_id: input.soundId,
+    p_uploaded_by_id: input.uploadedById,
+    p_source_path: input.sourceStoragePath,
+    p_playable_path: input.playableStoragePath,
+  });
+  if (!rpcBoolean(assertSupabaseResult('prepare sound upload recovery', result))) {
+    throw new Error('Sound upload recovery could not be prepared.');
+  }
+}
+
+/** Marks an upload ledger row as requiring object cleanup after a failed upload. */
+export async function markSoundUploadRecoveryPending(input: { soundId: string; lastError: string }): Promise<void> {
+  if (!rpcBoolean(assertSupabaseResult(
+    'mark sound upload recovery pending',
+    await createAdminClient().rpc('mark_sound_upload_recovery_pending', {
+      p_sound_id: input.soundId,
+      p_last_error: input.lastError,
+    }),
+  ))) {
+    throw new Error('Sound upload recovery could not be marked pending.');
+  }
+}
+
+/** Removes an upload ledger row only after the row/object outcome is settled. */
+export async function completeSoundUploadRecovery(soundId: string): Promise<void> {
+  if (!rpcBoolean(assertSupabaseResult(
+    'complete sound upload recovery',
+    await createAdminClient().rpc('complete_sound_upload_recovery', { p_sound_id: soundId }),
+  ))) {
+    throw new Error('Sound upload recovery could not be completed.');
+  }
+}
+
 /** Persists the generated trim path before the object upload starts. */
 export async function prepareSoundTrimMutation(input: {
   soundId: string;
@@ -350,8 +394,9 @@ export async function listPendingSoundMutationRecoveries(): Promise<SoundMutatio
   }));
 }
 
-function recoveryStage(recovery: SoundMutationRecovery): SoundFileDeletionStage {
-  if (!recovery.sourceStoragePath || !recovery.playableStoragePath || !recovery.stagedSourcePath || !recovery.stagedPlayablePath) {
+function recoveryStage(recovery: SoundMutationRecovery, requireSourceMimeType = true): SoundFileDeletionStage {
+  if (!recovery.sourceStoragePath || !recovery.playableStoragePath || !recovery.stagedSourcePath || !recovery.stagedPlayablePath
+      || (requireSourceMimeType && !recovery.sourceMimeType)) {
     throw new Error('Sound recovery intent is incomplete.');
   }
   return {
@@ -359,8 +404,53 @@ function recoveryStage(recovery: SoundMutationRecovery): SoundFileDeletionStage 
     playableStoragePath: recovery.playableStoragePath,
     stagedSourcePath: recovery.stagedSourcePath,
     stagedPlayablePath: recovery.stagedPlayablePath,
-    sourceMimeType: recovery.sourceMimeType ?? 'audio/wav',
+    sourceMimeType: recovery.sourceMimeType ?? '',
   };
+}
+
+interface SoundUploadRecovery {
+  soundId: string;
+  sourceStoragePath: string;
+  playableStoragePath: string;
+}
+
+/** Lists upload cleanup intents without exposing paths outside server code. */
+async function listPendingSoundUploadRecoveries(limit = 50): Promise<SoundUploadRecovery[]> {
+  const result = await createAdminClient()
+    .from('SoundUploadRecovery')
+    .select('soundId,sourceStoragePath,playableStoragePath,state')
+    .in('state', ['uploading', 'cleanup_pending'])
+    .order('createdAt', { ascending: true })
+    .limit(Math.min(Math.max(Math.trunc(limit), 1), 100));
+  const rows = (assertSupabaseResult('list sound upload recoveries', result) ?? []) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    soundId: row.soundId as string,
+    sourceStoragePath: row.sourceStoragePath as string,
+    playableStoragePath: row.playableStoragePath as string,
+  }));
+}
+
+/** Reconciles uploads that were interrupted before their Sound row settled. */
+async function reconcileSoundUploadRecoveries(): Promise<{ processed: number; deferred: number }> {
+  const recoveries = await listPendingSoundUploadRecoveries();
+  let processed = 0;
+  let deferred = 0;
+  for (const recovery of recoveries) {
+    try {
+      if (await getSound(recovery.soundId)) {
+        await completeSoundUploadRecovery(recovery.soundId);
+        processed += 1;
+        continue;
+      }
+      await deleteStorageObject(recovery.sourceStoragePath);
+      await deleteStorageObject(recovery.playableStoragePath);
+      await completeSoundUploadRecovery(recovery.soundId);
+      processed += 1;
+    } catch {
+      deferred += 1;
+    }
+  }
+  return { processed, deferred };
 }
 
 async function storageObjectExists(path: string): Promise<boolean> {
@@ -483,6 +573,7 @@ async function reconcileDeleteRecovery(recovery: SoundMutationRecovery): Promise
 
 /** Bounded server-only recovery consumer. It never returns storage paths. */
 export async function reconcileSoundMutationRecoveries(limit = 10): Promise<{ processed: number; deferred: number }> {
+  const uploadResult = await reconcileSoundUploadRecoveries().catch(() => ({ processed: 0, deferred: 1 }));
   const recoveries = (await listPendingSoundMutationRecoveries())
     .filter((recovery) => recovery.state !== 'manual_required' && new Date(recovery.nextAttemptAt).getTime() <= Date.now())
     .slice(0, Math.min(Math.max(Math.trunc(limit), 1), 50));
@@ -507,7 +598,7 @@ export async function reconcileSoundMutationRecoveries(limit = 10): Promise<{ pr
           await reconcileTrimRecovery(recovery);
         }
       } else if (recovery.state === 'delete_committed' || recovery.state === 'delete_restored') {
-        const stage = recoveryStage(recovery);
+        const stage = recoveryStage(recovery, false);
         await discardSoundFileStage(stage);
         await completeSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'delete' });
       } else {
@@ -524,7 +615,10 @@ export async function reconcileSoundMutationRecoveries(limit = 10): Promise<{ pr
       }).catch(() => undefined);
     }
   }
-  return { processed, deferred };
+  return {
+    processed: processed + uploadResult.processed,
+    deferred: deferred + uploadResult.deferred,
+  };
 }
 
 /** Commits a trim only if this worker still owns the lease and row version. */
@@ -767,10 +861,7 @@ export async function stageSoundFilesForDeletion(input: {
     p_sound_id: input.sound.id,
     p_token: input.lease.token,
     p_expected_version: input.lease.mutationVersion,
-    p_source_path: sourceStoragePath,
-    p_playable_path: playableStoragePath,
-    p_staged_source_path: staged.source,
-    p_staged_playable_path: staged.playable,
+    p_stage_id: input.stageId,
   });
   if (!rpcBoolean(assertSupabaseResult('prepare sound delete mutation', prepared))) {
     throw new Error('Sound delete mutation is no longer current.');
