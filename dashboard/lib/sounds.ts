@@ -9,6 +9,7 @@ import { createAdminClient } from './supabase/admin';
 
 const SOUND_BUCKET = 'sounds';
 const SIGNED_URL_TTL_SECONDS = 60 * 5;
+export const MAX_SOUND_CLEANUP_ATTEMPTS = 3;
 
 type StorageFile = Blob | ArrayBuffer | Uint8Array;
 type SoundStorageIdentity = { uploadedById: string; soundId: string };
@@ -92,6 +93,7 @@ export interface SoundCleanupTask {
   id: string;
   soundId: string | null;
   cleanupKind: SoundCleanupKind;
+  state: 'pending' | 'manual_required';
   attempts: number;
   nextAttemptAt: string;
   lastError: string | null;
@@ -230,7 +232,7 @@ export async function prepareSoundUploadRecovery(input: {
   if (!isSoundPath(input.sourceStoragePath) || !isSoundPath(input.playableStoragePath)) {
     throw new Error('Sound upload recovery paths are invalid.');
   }
-  const result = await createAdminClient().rpc('prepare_sound_upload_recovery', {
+  const result = await createAdminClient().rpc('prepare_sound_upload_recovery_tokenized', {
     p_sound_id: input.soundId,
     p_uploaded_by_id: input.uploadedById,
     p_source_path: input.sourceStoragePath,
@@ -261,7 +263,7 @@ export async function heartbeatSoundUploadRecovery(input: { soundId: string; tok
 export async function markSoundUploadRecoveryPending(input: { soundId: string; token: string; lastError: string }): Promise<void> {
   if (!rpcBoolean(assertSupabaseResult(
     'mark sound upload recovery pending',
-    await createAdminClient().rpc('mark_sound_upload_recovery_pending', {
+    await createAdminClient().rpc('mark_sound_upload_recovery_pending_tokenized', {
       p_sound_id: input.soundId,
       p_token: input.token,
       p_last_error: input.lastError,
@@ -281,7 +283,7 @@ export async function completeSoundUploadRecovery(input: {
 }): Promise<void> {
   if (!rpcBoolean(assertSupabaseResult(
     'complete sound upload recovery',
-    await createAdminClient().rpc('complete_sound_upload_recovery', {
+    await createAdminClient().rpc('complete_sound_upload_recovery_tokenized', {
       p_sound_id: input.soundId,
       p_token: input.token,
       p_source_path: input.sourceStoragePath,
@@ -825,7 +827,7 @@ export async function listPendingSoundCleanupTasks(limit = 100): Promise<SoundCl
   const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 500);
   const result = await createAdminClient()
     .from('SoundCleanupTask')
-    .select('id,soundId,cleanupKind,attempts,nextAttemptAt,lastError,createdAt')
+    .select('id,soundId,cleanupKind,state,attempts,nextAttemptAt,lastError,createdAt')
     .order('nextAttemptAt', { ascending: true })
     .limit(boundedLimit);
   const rows = (assertSupabaseResult('list sound cleanup tasks', result) ?? []) as Array<Record<string, unknown>>;
@@ -833,6 +835,7 @@ export async function listPendingSoundCleanupTasks(limit = 100): Promise<SoundCl
     id: row.id as string,
     soundId: (row.soundId ?? row.sound_id ?? null) as string | null,
     cleanupKind: (row.cleanupKind ?? row.cleanup_kind) as SoundCleanupKind,
+    state: (row.state ?? 'pending') as 'pending' | 'manual_required',
     attempts: Number(row.attempts),
     nextAttemptAt: (row.nextAttemptAt ?? row.next_attempt_at) as string,
     lastError: (row.lastError ?? row.last_error ?? null) as string | null,
@@ -843,22 +846,32 @@ export async function listPendingSoundCleanupTasks(limit = 100): Promise<SoundCl
 /** Attempts one queued object cleanup while keeping provider details server-only. */
 export async function retrySoundCleanupTask(taskId: string): Promise<boolean> {
   const client = createAdminClient();
-  const lookup = await client.from('SoundCleanupTask').select('id,soundId,objectPath,attempts').eq('id', taskId).maybeSingle();
-  const task = assertSupabaseResult('load sound cleanup task', lookup) as { id: string; soundId: string | null; objectPath: string; attempts: number } | null;
+  const lookup = await client.from('SoundCleanupTask').select('id,soundId,objectPath,attempts,state').eq('id', taskId).maybeSingle();
+  const task = assertSupabaseResult('load sound cleanup task', lookup) as { id: string; soundId: string | null; objectPath: string; attempts: number; state: 'pending' | 'manual_required' } | null;
   if (!task) return false;
+  if (task.state !== 'pending' || task.attempts >= MAX_SOUND_CLEANUP_ATTEMPTS) return false;
   try {
     await deleteStorageObject(task.objectPath);
     await finalizeRecoveryAfterCleanup(client, task.objectPath, task.soundId);
     assertSupabaseResult('remove completed sound cleanup task', await client.from('SoundCleanupTask').delete().eq('id', task.id));
     return true;
   } catch {
-    await client.from('SoundCleanupTask').update({
-      attempts: Number(task.attempts || 0) + 1,
-      nextAttemptAt: new Date(Date.now() + 60_000).toISOString(),
-      lastError: 'Storage cleanup attempt failed.',
-    }).eq('id', task.id);
+    await client.rpc('defer_sound_cleanup_task', { p_task_id: task.id });
     return false;
   }
+}
+
+/** Processes due cleanup tasks without exposing their storage paths. */
+export async function reconcileSoundCleanupTasks(limit = 10): Promise<{ processed: number; deferred: number }> {
+  const tasks = (await listPendingSoundCleanupTasks(Math.min(Math.max(Math.trunc(limit), 1), 50)))
+    .filter((task) => new Date(task.nextAttemptAt).getTime() <= Date.now());
+  let processed = 0;
+  let deferred = 0;
+  for (const task of tasks) {
+    if (await retrySoundCleanupTask(task.id)) processed += 1;
+    else deferred += 1;
+  }
+  return { processed, deferred };
 }
 
 async function finalizeRecoveryAfterCleanup(

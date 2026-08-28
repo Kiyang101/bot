@@ -142,6 +142,31 @@ ALTER TABLE public."SoundUploadRecovery"
   ALTER COLUMN "leaseToken" SET NOT NULL,
   ALTER COLUMN "leaseExpiresAt" SET NOT NULL;
 
+ALTER TABLE public."SoundCleanupTask"
+  ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT 'pending';
+ALTER TABLE public."SoundCleanupTask"
+  DROP CONSTRAINT IF EXISTS "SoundCleanupTask_state_check",
+  ADD CONSTRAINT "SoundCleanupTask_state_check" CHECK (state IN ('pending', 'manual_required'));
+
+CREATE OR REPLACE FUNCTION public.defer_sound_cleanup_task(p_task_id uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE public."SoundCleanupTask"
+  SET attempts = attempts + 1,
+      state = CASE WHEN attempts + 1 >= 3 THEN 'manual_required' ELSE 'pending' END,
+      "nextAttemptAt" = CURRENT_TIMESTAMP + interval '60 seconds',
+      "lastError" = 'Storage cleanup attempt failed.'
+  WHERE id = p_task_id AND state = 'pending' AND attempts < 3;
+  RETURN FOUND;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.defer_sound_cleanup_task(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.defer_sound_cleanup_task(uuid) TO service_role;
+
 ALTER TABLE public."SoundUploadRecovery" ENABLE ROW LEVEL SECURITY;
 GRANT ALL ON public."SoundUploadRecovery" TO service_role;
 

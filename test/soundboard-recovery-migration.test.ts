@@ -11,6 +11,14 @@ const soundsSource = readFileSync(
   new URL('../dashboard/lib/sounds.ts', import.meta.url),
   'utf8',
 );
+const instrumentationSource = readFileSync(
+  new URL('../dashboard/instrumentation.ts', import.meta.url),
+  'utf8',
+);
+const recoveryWorkerSource = readFileSync(
+  new URL('../dashboard/lib/sound-recovery-worker.ts', import.meta.url),
+  'utf8',
+);
 
 test('recovery migration persists replay intent and bounded consumer state', () => {
   for (const column of [
@@ -55,12 +63,42 @@ test('commit and cleanup contracts keep storage paths server-side and owner-deri
 
 test('upload cleanup intent is durable before Storage work and remains server-only', () => {
   assert.match(migration, /CREATE TABLE IF NOT EXISTS public\."SoundUploadRecovery"/);
-  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.prepare_sound_upload_recovery/);
-  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.mark_sound_upload_recovery_pending/);
-  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.complete_sound_upload_recovery/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.prepare_sound_upload_recovery_tokenized/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.mark_sound_upload_recovery_pending_tokenized/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.complete_sound_upload_recovery_tokenized/);
   assert.match(migration, /sourceStoragePath/);
   assert.match(migration, /playableStoragePath/);
-  assert.match(migration, /REVOKE ALL ON FUNCTION public\.prepare_sound_upload_recovery/);
+  assert.match(migration, /REVOKE ALL ON FUNCTION public\.prepare_sound_upload_recovery\(uuid, text, text, text\) FROM PUBLIC/);
+});
+
+test('legacy upload RPC signatures remain available beside tokenized contracts', () => {
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.prepare_sound_upload_recovery\(\n  p_sound_id uuid,\n  p_uploaded_by_id text,\n  p_source_path text,\n  p_playable_path text\n\)\nRETURNS boolean/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.mark_sound_upload_recovery_pending\(\n  p_sound_id uuid,\n  p_last_error text\n\)\nRETURNS boolean/);
+  assert.match(migration, /CREATE OR REPLACE FUNCTION public\.complete_sound_upload_recovery\(\n  p_sound_id uuid\n\)\nRETURNS boolean/);
+  assert.match(migration, /REVOKE ALL ON FUNCTION public\.mark_sound_upload_recovery_pending\(uuid, text\) FROM PUBLIC/);
+  assert.match(migration, /REVOKE ALL ON FUNCTION public\.complete_sound_upload_recovery\(uuid\) FROM PUBLIC/);
+  assert.doesNotMatch(migration, /DROP FUNCTION IF EXISTS public\.(?:prepare_sound_upload_recovery|mark_sound_upload_recovery_pending|complete_sound_upload_recovery)/);
+  assert.match(soundsSource, /prepare_sound_upload_recovery_tokenized/);
+  assert.match(soundsSource, /mark_sound_upload_recovery_pending_tokenized/);
+  assert.match(soundsSource, /complete_sound_upload_recovery_tokenized/);
+});
+
+test('durable recovery has an actual startup and scheduled consumer for both queues', () => {
+  assert.match(instrumentationSource, /export async function register\(\)/);
+  assert.match(instrumentationSource, /process\.env\.NEXT_RUNTIME !== 'nodejs'/);
+  assert.match(instrumentationSource, /setInterval/);
+  assert.match(instrumentationSource, /runSoundRecoveryWorker/);
+  assert.match(recoveryWorkerSource, /reconcileSoundMutationRecoveries/);
+  assert.match(recoveryWorkerSource, /reconcileSoundCleanupTasks/);
+  assert.match(recoveryWorkerSource, /inFlight/);
+});
+
+test('cleanup queue has bounded retries with explicit manual escalation', () => {
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT 'pending'/);
+  assert.match(migration, /state IN \('pending', 'manual_required'\)/);
+  assert.match(migration, /state = CASE WHEN .*manual_required/);
+  assert.match(soundsSource, /MAX_SOUND_CLEANUP_ATTEMPTS/);
+  assert.match(soundsSource, /reconcileSoundCleanupTasks/);
 });
 
 test('delete recovery persists the source MIME and restoration reads that intent', () => {
