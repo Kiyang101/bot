@@ -15,6 +15,10 @@ const instrumentationSource = readFileSync(
   new URL('../dashboard/instrumentation.ts', import.meta.url),
   'utf8',
 );
+const nodeInstrumentationSource = readFileSync(
+  new URL('../dashboard/instrumentation.node.ts', import.meta.url),
+  'utf8',
+);
 const recoveryWorkerSource = readFileSync(
   new URL('../dashboard/lib/sound-recovery-worker.ts', import.meta.url),
   'utf8',
@@ -85,9 +89,9 @@ test('legacy upload RPC signatures remain available beside tokenized contracts',
 
 test('durable recovery has an actual startup and scheduled consumer for both queues', () => {
   assert.match(instrumentationSource, /export async function register\(\)/);
-  assert.match(instrumentationSource, /process\.env\.NEXT_RUNTIME !== 'nodejs'/);
-  assert.match(instrumentationSource, /setInterval/);
-  assert.match(instrumentationSource, /runSoundRecoveryWorker/);
+  assert.match(instrumentationSource, /process\.env\.NEXT_RUNTIME === 'nodejs'/);
+  assert.match(nodeInstrumentationSource, /setInterval/);
+  assert.match(nodeInstrumentationSource, /runSoundRecoveryWorker/);
   assert.match(recoveryWorkerSource, /reconcileSoundMutationRecoveries/);
   assert.match(recoveryWorkerSource, /reconcileSoundCleanupTasks/);
   assert.match(recoveryWorkerSource, /inFlight/);
