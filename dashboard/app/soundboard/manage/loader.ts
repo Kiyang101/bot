@@ -15,7 +15,7 @@ export async function loadManagementPageData(): Promise<{
   // here; it only becomes relevant when a sound is played in Discord.
   const records = await listSounds();
   const sounds = await Promise.all(records.map(async (record) => {
-    const previewUrl = await getSignedSoundUrl(record.storagePath);
+    const previewUrl = await getSignedSoundUrl(record.storagePath).catch(() => '');
     const { storagePath: _storagePath, sourceStoragePath: _sourceStoragePath, ...clientSound } = record;
     return { ...clientSound, previewUrl, sourcePreviewUrl: null };
   }));

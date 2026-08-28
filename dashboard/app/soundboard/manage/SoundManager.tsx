@@ -22,13 +22,15 @@ import {
   MAX_GAIN_DB,
   MAX_SOUND_BYTES,
   MIN_GAIN_DB,
+  SOUND_CATEGORIES,
+  SOUND_COLOR_OPTIONS,
   SUPPORTED_SOUND_MIME_TYPES,
   validateUploadMeta,
 } from '@/lib/sound-validation';
 import WaveformEditor, { type TrimRange } from './WaveformEditor';
 
-const DEFAULT_CATEGORIES = ['Reactions', 'Memes', 'Music'];
-const COLOR_OPTIONS = ['#5865f2', '#3ba55c', '#faa61a', '#eb459e', '#ed4245'];
+const DEFAULT_CATEGORIES = [...SOUND_CATEGORIES];
+const COLOR_OPTIONS = [...SOUND_COLOR_OPTIONS];
 
 export type ManagedSound = SoundboardSound & {
   previewUrl: string;
@@ -447,18 +449,20 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
     }
     const uploaded = resultValue(result);
     if (uploaded) {
-      const previewResult = await actions.getSoundPlayableUrl(uploaded.id);
-      if (!previewResult.ok) {
-        setError(previewResult.message);
-        return;
-      }
-      const previewUrl = resultValue(previewResult);
-      if (!previewUrl) return;
       updateSounds((current) => [...current, {
         ...uploaded,
-        previewUrl,
+        previewUrl: '',
         sourcePreviewUrl: null,
       }]);
+      const previewResult = await actions.getSoundPlayableUrl(uploaded.id);
+      const previewUrl = resultValue(previewResult);
+      if (previewUrl) {
+        updateSounds((current) => current.map((sound) => sound.id === uploaded.id ? { ...sound, previewUrl } : sound));
+      } else if (!previewResult.ok) {
+        setError(previewResult.message);
+      } else {
+        setError('Could not load the sound preview. Use Refresh preview to try again.');
+      }
     }
     setAnnouncement(`${uploadMetadata.name} uploaded.`);
     setSelectedFile(null);
@@ -734,17 +738,23 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
                     <div><dt>Uploaded</dt><dd>{displayDate(sound.createdAt)}</dd></div>
                     <div><dt>Shortcut</dt><dd>{sound.shortcut ? sound.shortcut.toUpperCase() : '—'}</dd></div>
                   </dl>
-                  <audio
-                    className="sound-row-preview"
-                    controls
-                    preload="none"
-                    src={sound.previewUrl}
-                    aria-label={`Preview ${sound.name}`}
-                    onPlay={() => setPreviewingId(sound.id)}
-                    onPause={() => setPreviewingId((current) => current === sound.id ? null : current)}
-                    onEnded={() => setPreviewingId((current) => current === sound.id ? null : current)}
-                    onError={() => void refreshPlayableUrl(sound.id, sound.previewUrl)}
-                  />
+                  {sound.previewUrl ? <audio
+                      className="sound-row-preview"
+                      controls
+                      preload="none"
+                      src={sound.previewUrl}
+                      aria-label={`Preview ${sound.name}`}
+                      onPlay={() => setPreviewingId(sound.id)}
+                      onPause={() => setPreviewingId((current) => current === sound.id ? null : current)}
+                      onEnded={() => setPreviewingId((current) => current === sound.id ? null : current)}
+                      onError={() => void refreshPlayableUrl(sound.id, sound.previewUrl)}
+                    /> : <button
+                      type="button"
+                      className="secondary compact"
+                      aria-label={`Refresh preview for ${sound.name}`}
+                      disabled={isPending(`preview:${sound.id}`)}
+                      onClick={() => void refreshPlayableUrl(sound.id, sound.previewUrl)}
+                    >Refresh preview</button>}
                   <div className="sound-row-actions">
                     {isAdmin && (
                       <div className="sound-reorder-actions" aria-label={`Reorder ${sound.name}`}>

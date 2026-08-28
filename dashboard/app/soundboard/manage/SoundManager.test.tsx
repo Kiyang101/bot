@@ -157,10 +157,27 @@ describe('SoundManager', () => {
     const user = userEvent.setup();
     render(<SoundManager initialSounds={[]} currentUser={{ id: 'user-1', role: 'member' }} actions={actions} />);
     await user.upload(screen.getByLabelText('Choose MP3, WAV, or OGG file'), new File([new Uint8Array(32)], 'launch.wav', { type: 'audio/wav' }));
+    await screen.findByLabelText('Audio waveform');
     fireEvent.click((await screen.findAllByRole('button', { name: 'Upload sound' })).at(-1)!);
 
     const preview = await screen.findByLabelText('Preview Launch horn');
     expect(preview).toHaveAttribute('src', 'https://signed.example/refreshed-playable');
+  });
+
+  test('keeps a committed upload in the library when preview URL retrieval fails', async () => {
+    const actions = successfulActions({
+      getSoundPlayableUrl: vi.fn(async () => ({ ok: false as const, message: 'Preview service unavailable.' })),
+    });
+    const user = userEvent.setup();
+    render(<SoundManager initialSounds={[]} currentUser={{ id: 'user-1', role: 'member' }} actions={actions} />);
+    await user.upload(screen.getByLabelText('Choose MP3, WAV, or OGG file'), new File([new Uint8Array(32)], 'launch.wav', { type: 'audio/wav' }));
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Upload sound' })).at(-1)!);
+
+    await waitFor(() => expect(actions.uploadSound).toHaveBeenCalledOnce());
+    expect(screen.getByTestId('sound-row-sound-own')).toBeInTheDocument();
+    expect(screen.queryByText('launch.wav')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Preview service unavailable.');
+    expect(screen.getByRole('button', { name: 'Refresh preview for Launch horn' })).toBeInTheDocument();
   });
 
   test('refreshes an expired playable URL from the edit preview', async () => {

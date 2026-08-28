@@ -36,6 +36,22 @@ export async function listGuilds(): Promise<Guild[]> {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * Return guilds where the verified Discord user is a member and the bot is
+ * also present. A selected-guild cookie is intentionally not consulted here.
+ */
+export async function listAuthorizedGuilds(discordUserId: string): Promise<Guild[]> {
+  const guilds = await listGuilds();
+  const membership = await Promise.all(guilds.map(async (guild) => {
+    const res = await fetch(`${API}/guilds/${encodeURIComponent(guild.id)}/members/${encodeURIComponent(discordUserId)}`, {
+      headers: { Authorization: `Bot ${TOKEN}` },
+      cache: 'no-store',
+    });
+    return res.ok;
+  }));
+  return guilds.filter((_guild, index) => membership[index]);
+}
+
 /** Lists the server's text channels (type 0), for the settings dropdown. */
 export async function listTextChannels(guildId: string | null): Promise<TextChannel[]> {
   if (!guildId) return [];
@@ -56,6 +72,11 @@ export async function listVoiceChannels(guildId: string | null): Promise<TextCha
   return channels
     .filter((c) => c.type === 2)
     .map((c) => ({ id: c.id, name: c.name }));
+}
+
+/** Validate a client-supplied voice channel against the bot's guild channel list. */
+export async function isVoiceChannelInGuild(guildId: string, channelId: string): Promise<boolean> {
+  return (await listVoiceChannels(guildId)).some((channel) => channel.id === channelId);
 }
 
 /** Basic info about the given server. */

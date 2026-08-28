@@ -36,6 +36,8 @@ function createDependencies(overrides: Partial<SoundboardActionDependencies> = {
   return {
     getSessionUser: async () => ({ id: 'member-1', username: 'Member One', avatar: null, role: 'member' }),
     getSelectedGuildId: async () => 'guild-1',
+    getAuthorizedGuildIds: async () => ['guild-1'],
+    isVoiceChannelInGuild: async () => true,
     listSounds: async () => [ownSound, otherSound],
     getSound: async (id) => (id === ownSound.id ? ownSound : id === otherSound.id ? otherSound : null),
     getSignedSoundUrl: async () => 'https://signed.example/playable',
@@ -124,6 +126,49 @@ test('all authenticated users can play a global sound', async () => {
       fadeOutMs: 0,
     },
   ]);
+});
+
+test('selected guild playback is rejected when it is not in the verified member guild set', async () => {
+  let played = false;
+  const actions = createSoundboardActions(createDependencies({
+    getSelectedGuildId: async () => 'guild-not-member',
+    getAuthorizedGuildIds: async () => ['guild-1'],
+    sendSoundboardPlay: async () => { played = true; },
+  }));
+
+  const result = await actions.playSound({ soundId: ownSound.id, channelId: 'channel-1' });
+
+  assert.deepEqual(result, { ok: false, message: 'You are not a member of the selected server.' });
+  assert.equal(played, false);
+});
+
+test('stop rejects an unverified selected guild before contacting the bot', async () => {
+  let stopped = false;
+  const actions = createSoundboardActions(createDependencies({
+    getSelectedGuildId: async () => 'guild-not-member',
+    getAuthorizedGuildIds: async () => ['guild-1'],
+    sendSoundboardStop: async () => { stopped = true; },
+  }));
+
+  const result = await actions.stopSound('channel-1');
+
+  assert.deepEqual(result, { ok: false, message: 'You are not a member of the selected server.' });
+  assert.equal(stopped, false);
+});
+
+test('play and stop validate that the requested channel belongs to the selected guild', async () => {
+  const actions = createSoundboardActions(createDependencies({
+    isVoiceChannelInGuild: async () => false,
+  }));
+
+  assert.deepEqual(
+    await actions.playSound({ soundId: ownSound.id, channelId: 'channel-other-guild' }),
+    { ok: false, message: 'Pick a voice channel in the selected server.' },
+  );
+  assert.deepEqual(
+    await actions.stopSound('channel-other-guild'),
+    { ok: false, message: 'Pick a voice channel in the selected server.' },
+  );
 });
 
 test('a missing selected guild blocks playback but not global listing', async () => {
@@ -547,6 +592,82 @@ test('duplicate shortcuts are rejected before mutation and identify the conflict
 
   assert.deepEqual(result, { ok: false, message: 'Shortcut K is already assigned to Airhorn.' });
   assert.equal(updated, false);
+});
+
+test('members cannot submit custom categories or non-preset colors directly', async () => {
+  let updated = false;
+  const actions = createSoundboardActions(createDependencies({
+    updateSound: async () => { updated = true; return ownSound; },
+  }));
+
+  const customCategory = await actions.updateSound(ownSound.id, {
+    name: ownSound.name, category: 'Secret category', color: '#5865f2', shortcut: null,
+    gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
+  });
+  const customColor = await actions.updateSound(ownSound.id, {
+    name: ownSound.name, category: 'Reactions', color: '#123456', shortcut: null,
+    gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
+  });
+
+  assert.deepEqual(customCategory, { ok: false, message: 'Members may only use the shared sound categories.' });
+  assert.deepEqual(customColor, { ok: false, message: 'Choose one of the preset sound colors.' });
+  assert.equal(updated, false);
+});
+
+test('admins may submit a custom category but still must use a preset color', async () => {
+  const adminSound = { ...ownSound, uploadedById: 'member-2' };
+  let updateInput: { category?: string } | null = null;
+  const actions = createSoundboardActions(createDependencies({
+    getSessionUser: async () => ({ id: 'admin-1', username: 'Admin', avatar: null, role: 'admin' }),
+    getSound: async () => adminSound,
+    updateSound: async (_id, input) => { updateInput = input; return { ...adminSound, ...input }; },
+  }));
+
+  const result = await actions.updateSound(adminSound.id, {
+    name: adminSound.name, category: 'Tournament', color: '#faa61a', shortcut: null,
+    gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal((updateInput as { category?: string } | null)?.category, 'Tournament');
+});
+
+test('serializes concurrent trims so each superseded playable clip is cleaned up', async () => {
+  let current = ownSound as import('@/lib/sound-types').SoundRecord;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let version = 1;
+  const deleted: string[] = [];
+  const actions = createSoundboardActions(createDependencies({
+    getSound: async () => current,
+    downloadSource: async () => new Blob([new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+    ])]),
+    trimSourceFile: async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await Promise.resolve();
+      inFlight -= 1;
+      return { buffer: Buffer.from('clip'), durationSec: 0.4, sourceDurationSec: 1 };
+    },
+    uploadPlayableClip: async () => `sounds/member-1/sound-own/playable-version-${version++}`,
+    updateSound: async (_id, input) => {
+      current = { ...current, ...input };
+      return current;
+    },
+    deleteStorageObject: async (path) => { deleted.push(path); },
+  }));
+
+  await Promise.all([
+    actions.trimSound({ soundId: ownSound.id, trimStartMs: 0, trimEndMs: 400 }),
+    actions.trimSound({ soundId: ownSound.id, trimStartMs: 100, trimEndMs: 500 }),
+  ]);
+
+  assert.equal(maxInFlight, 1);
+  assert.deepEqual(deleted.sort(), [
+    ownSound.storagePath,
+    'sounds/member-1/sound-own/playable-version-1',
+  ].sort());
 });
 
 test('a shortcut uniqueness race is sanitized and identifies the newly conflicting sound', async () => {

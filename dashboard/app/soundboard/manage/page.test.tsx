@@ -76,4 +76,14 @@ describe('sound management page loader', () => {
       sourcePreviewUrl: null,
     }]);
   });
+
+  test('keeps committed sounds visible when a preview URL cannot be signed', async () => {
+    mocks.getSignedSoundUrl.mockRejectedValueOnce(new Error('storage unavailable'));
+
+    const { loadManagementPageData } = await import('./loader');
+
+    const data = await loadManagementPageData();
+
+    expect(data.sounds).toEqual([expect.objectContaining({ id: sound.id, previewUrl: '', sourcePreviewUrl: null })]);
+  });
 });

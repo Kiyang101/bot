@@ -2,9 +2,10 @@
 
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import type { BotStatus, MusicState } from '@/lib/control';
+import { SOUND_CATEGORIES } from '@/lib/sound-validation';
 import type { SoundboardActionResult, SoundboardSound } from './actions';
 
-const DEFAULT_CATEGORIES = ['Reactions', 'Memes', 'Music'];
+const DEFAULT_CATEGORIES: string[] = [...SOUND_CATEGORIES];
 
 export interface SoundboardActions {
   playSound: (input: { soundId: string; channelId: string }) => Promise<SoundboardActionResult<SoundboardSound>>;
@@ -59,7 +60,7 @@ export default function Soundboard({
 }: SoundboardProps) {
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('All');
-  const [channelId, setChannelId] = useState(channels[0]?.id ?? '');
+  const [channelId, setChannelId] = useState(initialMusicState.channelId ?? channels[0]?.id ?? '');
   const [activeSoundId, setActiveSoundId] = useState<string | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [startedAt, setStartedAt] = useState<number | null>(null);
@@ -67,6 +68,8 @@ export default function Soundboard({
   const [pendingStop, setPendingStop] = useState(false);
   const [previewSoundId, setPreviewSoundId] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewRefreshing, setPreviewRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   const categories = useMemo(() => categoryList(sounds), [sounds]);
@@ -86,7 +89,9 @@ export default function Soundboard({
 
   const activeSound = activeSoundId ? sounds.find((sound) => sound.id === activeSoundId) ?? null : null;
   const playbackAvailable = Boolean(selectedGuildId && channelId && botStatus === 'RUNNING');
-  const activeDuration = activeSound?.durationSec ?? null;
+  const activeDuration = activeSound
+    ? activeSound.durationSec ?? Math.max(0, (activeSound.trimEndMs - activeSound.trimStartMs) / 1_000)
+    : null;
 
   useEffect(() => {
     if (!channelId || !channels.some((channel) => channel.id === channelId)) {
@@ -131,21 +136,71 @@ export default function Soundboard({
     }
   }
 
+  useEffect(() => {
+    function handleShortcut(event: KeyboardEvent): void {
+      if (event.defaultPrevented || event.repeat || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (
+        target.isContentEditable
+        || target.tagName === 'INPUT'
+        || target.tagName === 'TEXTAREA'
+        || target.tagName === 'SELECT'
+        || target.closest('[contenteditable="true"]')
+      )) return;
+      if (!selectedGuildId || !channelId || botStatus !== 'RUNNING' || pendingSoundId || activeSoundId) return;
+      const shortcut = event.key === ' ' ? 'space' : event.key.length === 1 ? event.key.toLowerCase() : null;
+      if (!shortcut) return;
+      const sound = sounds.find((candidate) => candidate.shortcut === shortcut);
+      if (!sound) return;
+      event.preventDefault();
+      void handlePlay(sound);
+    }
+
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, [activeSoundId, botStatus, channelId, pendingSoundId, selectedGuildId, sounds]);
+
   async function handlePreview(sound: SoundboardSound): Promise<void> {
     setPreviewSoundId(sound.id);
     setPreviewUrl(null);
+    setPreviewError(null);
     setMessage(null);
     try {
       const result = await actions.getSoundPlayableUrl(sound.id);
       if (!result.ok) {
-        setMessage(result.message);
+        setPreviewError(result.message);
         setPreviewSoundId(null);
         return;
       }
-      setPreviewUrl(result.value ?? null);
+      if (!result.value) {
+        setPreviewError('Could not load the preview. Try again.');
+        setPreviewSoundId(null);
+        return;
+      }
+      setPreviewUrl(result.value);
     } catch {
-      setMessage('Could not load the preview. Try again.');
+      setPreviewError('Could not load the preview. Try again.');
       setPreviewSoundId(null);
+    }
+  }
+
+  async function refreshPreview(): Promise<void> {
+    if (!previewSoundId || previewRefreshing) return;
+    const sound = sounds.find((candidate) => candidate.id === previewSoundId);
+    if (!sound) return;
+    setPreviewRefreshing(true);
+    setPreviewError(null);
+    try {
+      const result = await actions.getSoundPlayableUrl(sound.id);
+      if (!result.ok || !result.value || result.value === previewUrl) {
+        setPreviewError(result.ok ? 'Could not refresh the sound preview. Try again.' : result.message);
+        return;
+      }
+      setPreviewUrl(result.value);
+    } catch {
+      setPreviewError('Could not refresh the sound preview. Try again.');
+    } finally {
+      setPreviewRefreshing(false);
     }
   }
 
@@ -205,7 +260,7 @@ export default function Soundboard({
         </div>
         <label className="soundboard-channel">
           Voice channel
-          <select value={channelId} onChange={(event) => setChannelId(event.target.value)} disabled={!selectedGuildId}>
+          <select value={channelId} onChange={(event) => setChannelId(event.target.value)} disabled={!selectedGuildId || Boolean(initialMusicState.channelId)}>
             <option value="">Choose a channel</option>
             {channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}
           </select>
@@ -251,6 +306,7 @@ export default function Soundboard({
       </section>
 
       {message && <p className="soundboard-message" role="status" aria-live="polite">{message}</p>}
+      {previewError && <p className="soundboard-message" role="alert">{previewError}</p>}
 
       {sounds.length === 0 ? (
         <section className="soundboard-empty empty">
@@ -295,7 +351,10 @@ export default function Soundboard({
       {previewUrl && previewSoundId && (
         <section className="soundboard-preview" aria-label="Sound preview">
           <div><span className="section-title">Browser preview</span><strong>{sounds.find((sound) => sound.id === previewSoundId)?.name}</strong></div>
-          <audio key={previewUrl} aria-label={`Preview ${sounds.find((sound) => sound.id === previewSoundId)?.name ?? 'sound'}`} controls src={previewUrl} />
+          <audio key={previewUrl} aria-label={`Preview ${sounds.find((sound) => sound.id === previewSoundId)?.name ?? 'sound'}`} controls src={previewUrl} onError={() => void refreshPreview()} />
+          <button type="button" className="secondary" onClick={() => void refreshPreview()} disabled={previewRefreshing}>
+            {previewRefreshing ? 'Refreshing preview…' : 'Refresh preview'}
+          </button>
         </section>
       )}
 

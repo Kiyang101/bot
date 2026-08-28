@@ -182,6 +182,7 @@ export interface MusicState {
   positionSec: number;
   playbackRate: number;
   paused: boolean;
+  channelId: string | null;
   channelName: string | null;
 }
 

@@ -15,6 +15,7 @@ const musicState: MusicState = {
   positionSec: 0,
   playbackRate: 1,
   paused: false,
+  channelId: null,
   channelName: null,
 };
 
@@ -154,6 +155,24 @@ describe('Soundboard', () => {
     await waitFor(() => expect(document.querySelector('audio')).toHaveAttribute('src', 'https://signed.example/playable'));
   });
 
+  test('refreshes the preview URL and reports media failures', async () => {
+    const user = userEvent.setup();
+    const actions = successfulActions({
+      getSoundPlayableUrl: vi.fn()
+        .mockResolvedValueOnce({ ok: true as const, value: 'https://signed.example/expired' })
+        .mockResolvedValueOnce({ ok: true as const, value: 'https://signed.example/refreshed' }),
+    });
+    renderBoard({ actions });
+
+    await user.click(screen.getByRole('button', { name: 'Preview Launch horn' }));
+    await waitFor(() => expect(screen.getAllByLabelText('Preview Launch horn').some((element) => element.tagName === 'AUDIO')).toBe(true));
+    const audio = screen.getAllByLabelText('Preview Launch horn').find((element) => element.tagName === 'AUDIO')!;
+    fireEvent.error(audio);
+
+    await waitFor(() => expect(actions.getSoundPlayableUrl).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByLabelText('Preview Launch horn').find((element) => element.tagName === 'AUDIO')).toHaveAttribute('src', 'https://signed.example/refreshed');
+  });
+
   test('uses native button keyboard activation for a pad', async () => {
     const user = userEvent.setup();
     const actions = successfulActions();
@@ -164,6 +183,52 @@ describe('Soundboard', () => {
     await user.keyboard('{Enter}');
 
     await waitFor(() => expect(actions.playSound).toHaveBeenCalledWith({ soundId: airhorn.id, channelId: 'channel-1' }));
+  });
+
+  test('plays the configured shortcut through the same play action', async () => {
+    const user = userEvent.setup();
+    const actions = successfulActions();
+    renderBoard({ actions });
+
+    await user.keyboard('l');
+
+    await waitFor(() => expect(actions.playSound).toHaveBeenCalledWith({ soundId: launchHorn.id, channelId: 'channel-1' }));
+  });
+
+  test('ignores shortcuts in editable fields, with modifiers, and when playback is unavailable', async () => {
+    const user = userEvent.setup();
+    const actions = successfulActions();
+    renderBoard({ actions });
+    const search = screen.getByRole('searchbox', { name: 'Search sounds' });
+    search.focus();
+    await user.keyboard('l');
+    await user.keyboard('{Control>}l{/Control}');
+    expect(actions.playSound).not.toHaveBeenCalled();
+
+    const unavailableActions = successfulActions();
+    renderBoard({ actions: unavailableActions, selectedGuildId: null });
+    await user.keyboard('l');
+    expect(unavailableActions.playSound).not.toHaveBeenCalled();
+  });
+
+  test('uses the active music channel and does not offer a mismatch', async () => {
+    const actions = successfulActions();
+    render(
+      <Soundboard
+        sounds={[launchHorn]}
+        currentUser={{ id: 'user-1', username: 'Kai', role: 'member' }}
+        selectedGuildId="guild-1"
+        guildName="Studio"
+        channels={[{ id: 'channel-1', name: 'Broadcast' }, { id: 'channel-2', name: 'Other' }]}
+        initialMusicState={{ ...musicState, channelId: 'channel-2', channelName: 'Other', current: launchHorn as never }}
+        botStatus="RUNNING"
+        actions={actions}
+      />,
+    );
+    expect(screen.getByLabelText('Voice channel')).toHaveValue('channel-2');
+    expect(screen.getByLabelText('Voice channel')).toBeDisabled();
+    await userEvent.setup().click(screen.getByRole('button', { name: /^Play Launch horn/ }));
+    expect(actions.playSound).toHaveBeenCalledWith({ soundId: launchHorn.id, channelId: 'channel-2' });
   });
 
   test('renders an empty state when filters remove every sound', async () => {

@@ -227,6 +227,10 @@ class MusicSession {
     if (channel.guild.id !== this.guildId) {
       throw new Error('Soundboard channel belongs to a different Discord server.');
     }
+    const activeChannelId = this.voiceChannel?.id ?? this.connection?.joinConfig.channelId ?? getVoiceConnection(this.guildId)?.joinConfig.channelId ?? null;
+    if (activeChannelId && activeChannelId !== channel.id) {
+      throw new Error(`Soundboard playback must use the active voice channel ${activeChannelId}.`);
+    }
     if (this.soundRequest || this.currentSoundStream) throw new SoundboardBusyError();
     const request = Symbol('soundboard-request');
     this.soundRequest = request;
@@ -571,6 +575,7 @@ class MusicSession {
       positionSec: this.positionSec(),
       playbackRate: effectPlaybackRate(this.effect, this.intensity),
       paused: this.isPaused(),
+      channelId: this.voiceChannel?.id ?? this.connection?.joinConfig.channelId ?? null,
       channelName: this.voiceChannel?.name ?? null,
     };
   }

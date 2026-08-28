@@ -17,13 +17,18 @@ import {
   type Effect,
 } from '@/lib/control';
 import { getSelectedGuildId, lockedGuildId, GUILD_COOKIE } from '@/lib/guild';
-import { requireRole } from '@/lib/session';
+import { getSessionUser, requireRole } from '@/lib/session';
+import { listAuthorizedGuilds } from '@/lib/discord';
 import { readBotRuntime } from '@/lib/runtime';
 import { forceStopProcess, processIsAlive, startManagedBot } from '@/lib/botProcess';
 import { getBotStatus, sendBotStop } from '@/lib/control';
 
 /** Switches which Discord server the dashboard is viewing (stored in a cookie). */
 export async function selectGuild(guildId: string) {
+  const user = await getSessionUser({ allowRemoteAdmin: true });
+  if (!user) return;
+  const authorizedGuilds = await listAuthorizedGuilds(user.id);
+  if (!authorizedGuilds.some((guild) => guild.id === guildId)) return;
   // Remote (ngrok) visitors and server-scoped dashboard links are locked to one server —
   // ignore attempts to switch away from it.
   const locked = await lockedGuildId();

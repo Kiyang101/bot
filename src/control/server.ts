@@ -262,7 +262,7 @@ export function soundboardErrorResponse(error: unknown): {
   }
   return {
     status: 500,
-    payload: { error: error instanceof Error ? error.message : 'unknown error' },
+    payload: { error: 'soundboard_error' },
   };
 }
 
@@ -278,6 +278,7 @@ function emptyMusicState(): MusicState {
     positionSec: 0,
     playbackRate: 1,
     paused: false,
+    channelId: null,
     channelName: null,
   };
 }

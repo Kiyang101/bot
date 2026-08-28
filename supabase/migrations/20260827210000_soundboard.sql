@@ -6,7 +6,7 @@ CREATE TABLE public."Sound" (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 60),
   category text NOT NULL CHECK (char_length(category) BETWEEN 1 AND 40),
-  color text NOT NULL,
+  color text NOT NULL CHECK (lower(color) IN ('#5865f2', '#3ba55c', '#faa61a', '#eb459e', '#ed4245')),
   "storagePath" text NOT NULL,
   "sourceStoragePath" text NOT NULL,
   "mimeType" text NOT NULL CHECK ("mimeType" IN ('audio/mpeg', 'audio/wav', 'audio/ogg')),

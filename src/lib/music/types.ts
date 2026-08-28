@@ -62,6 +62,8 @@ export interface MusicState {
   /** Speed multiplier from the active effect (1 = normal). */
   playbackRate: number;
   paused: boolean;
+  /** Discord voice channel id the session is currently bound to, if any. */
+  channelId: string | null;
   /** Voice channel name the bot is playing in, if connected. */
   channelName: string | null;
 }

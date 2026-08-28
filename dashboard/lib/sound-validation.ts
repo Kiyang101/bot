@@ -6,6 +6,8 @@ export const MIN_CLIP_LENGTH_MS = 100;
 export const MIN_GAIN_DB = -24;
 export const MAX_GAIN_DB = 12;
 export const MAX_FADE_MS = 5000;
+export const SOUND_CATEGORIES = ['Reactions', 'Memes', 'Music'] as const;
+export const SOUND_COLOR_OPTIONS = ['#5865f2', '#3ba55c', '#faa61a', '#eb459e', '#ed4245'] as const;
 
 export const SUPPORTED_SOUND_MIME_TYPES = [
   'audio/mpeg',
@@ -60,6 +62,14 @@ export function normalizeShortcut(shortcut: string): string | null {
   const codePoint = shortcut.codePointAt(0);
   if (codePoint === undefined || codePoint < 0x21 || codePoint > 0x7e) return null;
   return shortcut.toLowerCase();
+}
+
+export function isPresetSoundColor(color: string): boolean {
+  return (SOUND_COLOR_OPTIONS as readonly string[]).includes(color.toLowerCase());
+}
+
+export function isSharedSoundCategory(category: string): boolean {
+  return (SOUND_CATEGORIES as readonly string[]).includes(category as (typeof SOUND_CATEGORIES)[number]);
 }
 
 type MutatingUser = { id: string; role: 'admin' | 'member' };

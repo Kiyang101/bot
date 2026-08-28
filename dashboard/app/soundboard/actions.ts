@@ -5,6 +5,8 @@ import {
   MAX_GAIN_DB,
   MIN_GAIN_DB,
   canEditSound,
+  isPresetSoundColor,
+  isSharedSoundCategory,
   normalizeShortcut,
   validateTrimRange,
   validateUploadMeta,
@@ -59,6 +61,8 @@ export interface PlaySoundInput {
 export interface SoundboardActionDependencies {
   getSessionUser: () => Promise<SessionUser | null>;
   getSelectedGuildId: () => Promise<string | null>;
+  getAuthorizedGuildIds: (discordUserId: string) => Promise<readonly string[]>;
+  isVoiceChannelInGuild: (guildId: string, channelId: string) => Promise<boolean>;
   listSounds: () => Promise<SoundRecord[]>;
   getSound: (id: string) => Promise<SoundRecord | null>;
   getSignedSoundUrl: (path: string) => Promise<string>;
@@ -105,6 +109,7 @@ const PUBLIC_PROCESSING_MESSAGES = new Set([
 const CLEANUP_RETRY_ATTEMPTS = 3;
 const CLEANUP_WARNING = 'Audio cleanup could not be completed. Please retry or contact an administrator.';
 const DELETE_CLEANUP_WARNING = 'Sound deleted, but temporary cleanup could not be completed. An administrator can retry cleanup.';
+const trimLocks = new Map<string, Promise<void>>();
 
 function actionError(error: unknown, fallback: string): SoundMutationResult {
   if (error instanceof SoundboardBusyError) return { ok: false, message: error.message };
@@ -130,6 +135,20 @@ function addWarning<T>(result: SoundboardActionResult<T>, warning: string | null
   return warning ? { ...result, warning } : result;
 }
 
+async function withTrimLock<T>(soundId: string, work: () => Promise<T>): Promise<T> {
+  const previous = trimLocks.get(soundId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  trimLocks.set(soundId, current);
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+    if (trimLocks.get(soundId) === current) trimLocks.delete(soundId);
+  }
+}
+
 async function requireUser(dependencies: SoundboardActionDependencies): Promise<SessionUser | null> {
   return dependencies.getSessionUser();
 }
@@ -153,16 +172,22 @@ function validSoundId(soundId: unknown): string | null {
   return value || null;
 }
 
-function validateMetadata(input: Partial<SoundMetadataInput> | null | undefined): SoundMutationResult<ValidSoundMetadata> {
+function validateMetadata(
+  input: Partial<SoundMetadataInput> | null | undefined,
+  allowCustomCategory: boolean,
+): SoundMutationResult<ValidSoundMetadata> {
   const name = typeof input?.name === 'string' ? input.name : '';
   const nameResult = validateUploadMeta(name, 'audio/wav', 0);
   if (!nameResult.ok) return nameResult;
 
   const category = typeof input?.category === 'string' ? input.category.trim() : '';
   if (!category || category.length > 40) return { ok: false, message: 'Category must be between 1 and 40 characters.' };
+  if (!allowCustomCategory && !isSharedSoundCategory(category)) {
+    return { ok: false, message: 'Members may only use the shared sound categories.' };
+  }
 
   const color = typeof input?.color === 'string' ? input.color.trim() : '';
-  if (!/^#[0-9a-f]{6}$/i.test(color)) return { ok: false, message: 'Choose a valid sound color.' };
+  if (!isPresetSoundColor(color)) return { ok: false, message: 'Choose one of the preset sound colors.' };
 
   const shortcutInput = input?.shortcut ?? '';
   if (typeof shortcutInput !== 'string') return { ok: false, message: 'Shortcut is invalid.' };
@@ -258,9 +283,12 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         dependencies.listSounds(),
         dependencies.getSelectedGuildId(),
       ]);
+      const authorizedSelectedGuild = selectedGuildId && await dependencies.getAuthorizedGuildIds(user.id)
+        .then((guildIds) => guildIds.includes(selectedGuildId))
+        .catch(() => false);
       return {
         user: { id: user.id, username: user.username, role: user.role },
-        selectedGuildId,
+        selectedGuildId: authorizedSelectedGuild ? selectedGuildId : null,
         sounds: sounds.map(asClientSound),
       };
     },
@@ -276,6 +304,13 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       if (!guildId) return { ok: false, message: 'No server selected.' };
 
       try {
+        const authorizedGuildIds = await dependencies.getAuthorizedGuildIds(user.id);
+        if (!authorizedGuildIds.includes(guildId)) {
+          return { ok: false, message: 'You are not a member of the selected server.' };
+        }
+        if (!await dependencies.isVoiceChannelInGuild(guildId, channelId)) {
+          return { ok: false, message: 'Pick a voice channel in the selected server.' };
+        }
         const sound = await dependencies.getSound(soundId);
         if (!sound) return { ok: false, message: 'Sound not found.' };
         const audioUrl = await dependencies.getSignedSoundUrl(sound.storagePath);
@@ -302,6 +337,13 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       if (!guildId) return { ok: false, message: 'No server selected.' };
 
       try {
+        const authorizedGuildIds = await dependencies.getAuthorizedGuildIds(user.id);
+        if (!authorizedGuildIds.includes(guildId)) {
+          return { ok: false, message: 'You are not a member of the selected server.' };
+        }
+        if (!await dependencies.isVoiceChannelInGuild(guildId, normalizedChannelId)) {
+          return { ok: false, message: 'Pick a voice channel in the selected server.' };
+        }
         await dependencies.sendSoundboardStop(guildId, normalizedChannelId);
         return { ok: true };
       } catch (error) {
@@ -313,7 +355,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const user = await requireUser(dependencies);
       if (!user) return { ok: false, message: 'Not authenticated.' };
       if (!input || typeof input !== 'object') return { ok: false, message: 'Upload details are required.' };
-      const metadata = validateMetadata(input);
+      const metadata = validateMetadata(input, user.role === 'admin');
       if (!metadata.ok) return metadata;
       const file = input?.file;
       if (!file || typeof file.arrayBuffer !== 'function') return { ok: false, message: 'Choose an audio file to upload.' };
@@ -395,7 +437,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const id = validSoundId(soundId);
       if (!id) return { ok: false, message: 'Sound id is required.' };
       if (!input || typeof input !== 'object') return { ok: false, message: 'Sound details are required.' };
-      const metadata = validateMetadata(input);
+      const metadata = validateMetadata(input, user.role === 'admin');
       if (!metadata.ok) return metadata;
 
       try {
@@ -424,48 +466,50 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const trim = normalizeTrimRequest(input);
       if (!trim.ok) return trim;
 
-      let stagedPlayablePath: string | null = null;
-      try {
-        const sound = await dependencies.getSound(soundId);
-        if (!sound) return { ok: false, message: 'Sound not found.' };
-        const authorization = authorizeSoundMutation(user, sound);
-        if (authorization) return authorization;
-        const source = await dependencies.downloadSource({ uploadedById: sound.uploadedById, soundId: sound.id });
-        const sourceBytes = new Uint8Array(await source.arrayBuffer());
-        const sourceMimeType = detectSupportedAudioMimeType(sourceBytes);
-        if (!sourceMimeType) return { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' };
-        const clip = await dependencies.trimSourceFile({
-          source: sourceBytes,
-          mimeType: sourceMimeType,
-          trimStartMs: trim.value.trimStartMs,
-          trimEndMs: trim.value.trimEndMs,
-        });
-        stagedPlayablePath = await dependencies.uploadPlayableClip({
-          uploadedById: sound.uploadedById,
-          soundId: sound.id,
-          file: clip.buffer,
-          mimeType: 'audio/wav',
-          versionId: dependencies.createSoundId(),
-        });
-        const updated = await dependencies.updateSound(sound.id, {
-          storagePath: stagedPlayablePath,
-          ...trim.value,
-          durationSec: clip.durationSec,
-        });
-        stagedPlayablePath = null;
-        const previousClipDeleted = await retryCleanup(() => dependencies.deleteStorageObject(sound.storagePath));
-        revalidateSoundboard(dependencies);
-        return {
-          ok: true,
-          value: asClientSound(updated),
-          ...(previousClipDeleted ? {} : { warning: DELETE_CLEANUP_WARNING }),
-        };
-      } catch (error) {
-        const cleanupWarning = stagedPlayablePath && !await retryCleanup(
-          () => dependencies.deleteStorageObject(stagedPlayablePath!),
-        ) ? CLEANUP_WARNING : null;
-        return addWarning(actionError(error, 'Failed to trim sound.'), cleanupWarning);
-      }
+      return withTrimLock(soundId, async () => {
+        let stagedPlayablePath: string | null = null;
+        try {
+          const sound = await dependencies.getSound(soundId);
+          if (!sound) return { ok: false, message: 'Sound not found.' };
+          const authorization = authorizeSoundMutation(user, sound);
+          if (authorization) return authorization;
+          const source = await dependencies.downloadSource({ uploadedById: sound.uploadedById, soundId: sound.id });
+          const sourceBytes = new Uint8Array(await source.arrayBuffer());
+          const sourceMimeType = detectSupportedAudioMimeType(sourceBytes);
+          if (!sourceMimeType) return { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' };
+          const clip = await dependencies.trimSourceFile({
+            source: sourceBytes,
+            mimeType: sourceMimeType,
+            trimStartMs: trim.value.trimStartMs,
+            trimEndMs: trim.value.trimEndMs,
+          });
+          stagedPlayablePath = await dependencies.uploadPlayableClip({
+            uploadedById: sound.uploadedById,
+            soundId: sound.id,
+            file: clip.buffer,
+            mimeType: 'audio/wav',
+            versionId: dependencies.createSoundId(),
+          });
+          const updated = await dependencies.updateSound(sound.id, {
+            storagePath: stagedPlayablePath,
+            ...trim.value,
+            durationSec: clip.durationSec,
+          });
+          stagedPlayablePath = null;
+          const previousClipDeleted = await retryCleanup(() => dependencies.deleteStorageObject(sound.storagePath));
+          revalidateSoundboard(dependencies);
+          return {
+            ok: true,
+            value: asClientSound(updated),
+            ...(previousClipDeleted ? {} : { warning: DELETE_CLEANUP_WARNING }),
+          };
+        } catch (error) {
+          const cleanupWarning = stagedPlayablePath && !await retryCleanup(
+            () => dependencies.deleteStorageObject(stagedPlayablePath!),
+          ) ? CLEANUP_WARNING : null;
+          return addWarning(actionError(error, 'Failed to trim sound.'), cleanupWarning);
+        }
+      });
     },
 
     async getSoundPlayableUrl(soundId: string): Promise<SoundboardActionResult<string>> {
@@ -565,9 +609,10 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
 }
 
 async function loadDefaultDependencies(): Promise<SoundboardActionDependencies> {
-  const [session, guild, sounds, audio, control, cache] = await Promise.all([
+  const [session, guild, guilds, sounds, audio, control, cache] = await Promise.all([
     import('../../lib/session'),
     import('../../lib/guild'),
+    import('../../lib/discord'),
     import('../../lib/sounds'),
     import('../../lib/audio'),
     import('../../lib/control'),
@@ -576,6 +621,8 @@ async function loadDefaultDependencies(): Promise<SoundboardActionDependencies> 
   return {
     getSessionUser: session.getSoundboardSessionUser,
     getSelectedGuildId: guild.getSelectedGuildId,
+    getAuthorizedGuildIds: async (discordUserId: string) => (await guilds.listAuthorizedGuilds(discordUserId)).map((item) => item.id),
+    isVoiceChannelInGuild: guilds.isVoiceChannelInGuild,
     listSounds: sounds.listSounds,
     getSound: sounds.getSound,
     getSignedSoundUrl: sounds.getSignedSoundUrl,

@@ -384,6 +384,33 @@ test('MusicSession soundboard play and stop preserve active music state', async 
   }
 });
 
+test('soundboard playback rejects a different channel while music is active', async () => {
+  const guildId = 'guild-stable-channel';
+  const session = musicManager.getOrCreate(guildId);
+  const unsafeSession = session as unknown as {
+    current: Track | null;
+    voiceChannel: VoiceBasedChannel | null;
+    ensureConnection(channel: VoiceBasedChannel): VoiceConnection;
+  };
+  unsafeSession.current = track;
+  unsafeSession.voiceChannel = { id: 'voice-active', guild: { id: guildId } } as VoiceBasedChannel;
+  unsafeSession.ensureConnection = () => { throw new Error('must not move the connection'); };
+
+  try {
+    await assert.rejects(
+      session.playSound(
+        { id: 'voice-other', guild: { id: guildId } } as VoiceBasedChannel,
+        'https://storage.example.test/overlay.wav',
+        { gainDb: 0, fadeInMs: 0, fadeOutMs: 0 },
+      ),
+      /active voice channel voice-active/,
+    );
+    assert.equal(session.getState().channelId, 'voice-active');
+  } finally {
+    session.stop();
+  }
+});
+
 test('rejects loop and non-HTTP audio inputs at the control boundary', async () => {
   const sessions: SoundboardSessions = {
     get: () => null,
@@ -455,7 +482,7 @@ test('maps an occupied overlay to the typed busy response and keeps unexpected e
   });
   assert.deepEqual(soundboardErrorResponse(new Error('decode failed')), {
     status: 500,
-    payload: { error: 'decode failed' },
+    payload: { error: 'soundboard_error' },
   });
 });
 

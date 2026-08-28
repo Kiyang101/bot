@@ -20,6 +20,7 @@ const EMPTY: MusicState = {
   positionSec: 0,
   playbackRate: 1,
   paused: false,
+  channelId: null,
   channelName: null,
 };
 
