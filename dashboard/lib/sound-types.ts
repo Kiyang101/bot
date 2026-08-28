@@ -25,7 +25,7 @@ export interface SoundRecord {
 
 export type SoundMutationResult<T = undefined> =
   | { ok: true; value: T }
-  | { ok: false; message: string };
+  | { ok: false; message: string; recoveryRequired?: boolean };
 
 export interface SoundPlaybackOptions {
   gainDb: number;

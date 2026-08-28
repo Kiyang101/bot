@@ -26,6 +26,37 @@ export interface SoundMutationLease {
 export type SoundMutationOperation = 'trim' | 'delete';
 export type SoundCleanupKind = 'delete_object' | 'discard_stage';
 
+export type SoundMutationRecoveryState =
+  | 'trim_uploading'
+  | 'trim_uploaded'
+  | 'trim_committed'
+  | 'delete_staging'
+  | 'delete_ready'
+  | 'delete_objects_removed'
+  | 'delete_committed'
+  | 'restore_pending';
+
+export interface SoundMutationRecovery {
+  id: string;
+  soundId: string | null;
+  token: string;
+  operation: SoundMutationOperation;
+  state: SoundMutationRecoveryState;
+  expectedVersion: number;
+  sourceStoragePath: string | null;
+  playableStoragePath: string | null;
+  stagedSourcePath: string | null;
+  stagedPlayablePath: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SoundRestoreResult {
+  sourceRestored: boolean;
+  playableRestored: boolean;
+}
+
 export interface SoundCleanupTask {
   id: string;
   soundId: string | null;
@@ -158,6 +189,80 @@ export async function releaseSoundMutation(input: { soundId: string; token: stri
   );
 }
 
+/** Persists the generated trim path before the object upload starts. */
+export async function prepareSoundTrimMutation(input: {
+  soundId: string;
+  lease: SoundMutationLease;
+  versionId: string;
+  previousPlayablePath: string;
+}): Promise<void> {
+  const result = await createAdminClient().rpc('prepare_sound_trim_mutation', {
+    p_sound_id: input.soundId,
+    p_token: input.lease.token,
+    p_expected_version: input.lease.mutationVersion,
+    p_version_id: input.versionId,
+    p_previous_playable_path: input.previousPlayablePath,
+  });
+  if (!rpcBoolean(assertSupabaseResult('prepare sound trim mutation', result))) {
+    throw new Error('Sound trim mutation is no longer current.');
+  }
+}
+
+/** Advances a server-only recovery record; paths never cross the action boundary. */
+export async function markSoundMutationRecovery(input: {
+  soundId: string;
+  token: string;
+  state: SoundMutationRecoveryState;
+  lastError?: string;
+}): Promise<void> {
+  const result = assertSupabaseResult(
+    'mark sound mutation recovery',
+    await createAdminClient().rpc('mark_sound_mutation_recovery', {
+      p_sound_id: input.soundId,
+      p_token: input.token,
+      p_state: input.state,
+      p_last_error: input.lastError ?? null,
+    }),
+  );
+  if (!rpcBoolean(result)) throw new Error('Sound mutation recovery record is unavailable.');
+}
+
+/** Removes a recovery record only after all corresponding object cleanup is confirmed. */
+export async function completeSoundMutationRecovery(input: { soundId: string; token: string }): Promise<void> {
+  const result = assertSupabaseResult(
+    'complete sound mutation recovery',
+    await createAdminClient().rpc('complete_sound_mutation_recovery', {
+      p_sound_id: input.soundId,
+      p_token: input.token,
+    }),
+  );
+  if (!rpcBoolean(result)) throw new Error('Sound mutation recovery record could not be completed.');
+}
+
+/** Internal reconciliation input; storage paths are intentionally never serialized to clients. */
+export async function listPendingSoundMutationRecoveries(): Promise<SoundMutationRecovery[]> {
+  const result = await createAdminClient()
+    .from('SoundMutationRecovery')
+    .select('*')
+    .order('updatedAt', { ascending: true });
+  const rows = (assertSupabaseResult('list sound mutation recoveries', result) ?? []) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: row.id as string,
+    soundId: (row.soundId ?? row.sound_id ?? null) as string | null,
+    token: row.token as string,
+    operation: row.operation as SoundMutationOperation,
+    state: row.state as SoundMutationRecoveryState,
+    expectedVersion: Number(row.expectedVersion ?? row.expected_version),
+    sourceStoragePath: (row.sourceStoragePath ?? row.source_storage_path ?? null) as string | null,
+    playableStoragePath: (row.playableStoragePath ?? row.playable_storage_path ?? null) as string | null,
+    stagedSourcePath: (row.stagedSourcePath ?? row.staged_source_path ?? null) as string | null,
+    stagedPlayablePath: (row.stagedPlayablePath ?? row.staged_playable_path ?? null) as string | null,
+    lastError: (row.lastError ?? row.last_error ?? null) as string | null,
+    createdAt: (row.createdAt ?? row.created_at) as string,
+    updatedAt: (row.updatedAt ?? row.updated_at) as string,
+  }));
+}
+
 /** Commits a trim only if this worker still owns the lease and row version. */
 export async function commitSoundTrim(input: {
   soundId: string;
@@ -236,11 +341,12 @@ export async function listPendingSoundCleanupTasks(limit = 100): Promise<SoundCl
 /** Attempts one queued object cleanup while keeping provider details server-only. */
 export async function retrySoundCleanupTask(taskId: string): Promise<boolean> {
   const client = createAdminClient();
-  const lookup = await client.from('SoundCleanupTask').select('id,objectPath,attempts').eq('id', taskId).maybeSingle();
-  const task = assertSupabaseResult('load sound cleanup task', lookup) as { id: string; objectPath: string; attempts: number } | null;
+  const lookup = await client.from('SoundCleanupTask').select('id,soundId,objectPath,attempts').eq('id', taskId).maybeSingle();
+  const task = assertSupabaseResult('load sound cleanup task', lookup) as { id: string; soundId: string | null; objectPath: string; attempts: number } | null;
   if (!task) return false;
   try {
     await deleteStorageObject(task.objectPath);
+    await finalizeRecoveryAfterCleanup(client, task.objectPath, task.soundId);
     assertSupabaseResult('remove completed sound cleanup task', await client.from('SoundCleanupTask').delete().eq('id', task.id));
     return true;
   } catch {
@@ -250,6 +356,43 @@ export async function retrySoundCleanupTask(taskId: string): Promise<boolean> {
       lastError: 'Storage cleanup attempt failed.',
     }).eq('id', task.id);
     return false;
+  }
+}
+
+async function finalizeRecoveryAfterCleanup(
+  client: ReturnType<typeof createAdminClient>,
+  objectPath: string,
+  soundId: string | null,
+): Promise<void> {
+  if (!soundId) return;
+  const result = await client
+    .from('SoundMutationRecovery')
+    .select('id,token,state,playableStoragePath,stagedSourcePath,stagedPlayablePath')
+    .eq('soundId', soundId);
+  const recoveries = (assertSupabaseResult('load sound recovery after cleanup', result) ?? []) as Array<Record<string, unknown>>;
+  for (const recovery of recoveries) {
+    const state = recovery.state as SoundMutationRecoveryState;
+    if (state === 'trim_committed' && recovery.playableStoragePath === objectPath) {
+      assertSupabaseResult(
+        'complete trimmed sound recovery',
+        await client.from('SoundMutationRecovery').delete().eq('id', recovery.id),
+      );
+      continue;
+    }
+    if (state !== 'delete_committed') continue;
+    const stagedSourcePath = recovery.stagedSourcePath as string | null;
+    const stagedPlayablePath = recovery.stagedPlayablePath as string | null;
+    if (objectPath !== stagedSourcePath && objectPath !== stagedPlayablePath) continue;
+    const storage = client.storage.from(SOUND_BUCKET);
+    const [sourceResult, playableResult] = await Promise.all([
+      stagedSourcePath ? storage.download(stagedSourcePath) : Promise.resolve({ data: null, error: null }),
+      stagedPlayablePath ? storage.download(stagedPlayablePath) : Promise.resolve({ data: null, error: null }),
+    ]);
+    if (!sourceResult.error && sourceResult.data || !playableResult.error && playableResult.data) continue;
+    assertSupabaseResult(
+      'complete deleted sound recovery',
+      await client.from('SoundMutationRecovery').delete().eq('id', recovery.id),
+    );
   }
 }
 
@@ -350,6 +493,7 @@ export async function deleteStorageObject(path: string): Promise<void> {
 export async function stageSoundFilesForDeletion(input: {
   sound: Pick<SoundRecord, 'id' | 'uploadedById' | 'sourceStoragePath' | 'storagePath' | 'mimeType'>;
   stageId: string;
+  lease: SoundMutationLease;
 }): Promise<SoundFileDeletionStage> {
   const identity = { uploadedById: input.sound.uploadedById, soundId: input.sound.id };
   const sourceStoragePath = requireRecordStoragePath(input.sound.sourceStoragePath, identity, 'source');
@@ -357,9 +501,32 @@ export async function stageSoundFilesForDeletion(input: {
   const staged = deletionStagePaths(identity, input.stageId);
   const storage = createAdminClient().storage.from(SOUND_BUCKET);
 
+  const prepared = await createAdminClient().rpc('prepare_sound_delete_mutation', {
+    p_sound_id: input.sound.id,
+    p_token: input.lease.token,
+    p_expected_version: input.lease.mutationVersion,
+    p_source_path: sourceStoragePath,
+    p_playable_path: playableStoragePath,
+    p_staged_source_path: staged.source,
+    p_staged_playable_path: staged.playable,
+  });
+  if (!rpcBoolean(assertSupabaseResult('prepare sound delete mutation', prepared))) {
+    throw new Error('Sound delete mutation is no longer current.');
+  }
+
   try {
     assertSupabaseResult('stage sound source', await storage.copy(sourceStoragePath, staged.source));
     assertSupabaseResult('stage playable sound', await storage.copy(playableStoragePath, staged.playable));
+    const marked = assertSupabaseResult(
+      'mark sound deletion staged',
+      await createAdminClient().rpc('mark_sound_mutation_recovery', {
+        p_sound_id: input.sound.id,
+        p_token: input.lease.token,
+        p_state: 'delete_ready',
+        p_last_error: null,
+      }),
+    );
+    if (!rpcBoolean(marked)) throw new Error('Sound deletion staging record is unavailable.');
   } catch (error) {
     await storage.remove([staged.source, staged.playable]).catch(() => undefined);
     throw error;
@@ -397,19 +564,46 @@ async function uploadWithCompensationRetries(path: string, file: Blob, mimeType:
 }
 
 /** Restores both live objects from staging when storage or row deletion fails. */
-export async function restoreSoundFiles(stage: SoundFileDeletionStage): Promise<void> {
+export async function restoreSoundFiles(stage: SoundFileDeletionStage): Promise<SoundRestoreResult> {
   const storage = createAdminClient().storage.from(SOUND_BUCKET);
-  const [sourceResult, playableResult] = await Promise.all([
-    storage.download(stage.stagedSourcePath),
-    storage.download(stage.stagedPlayablePath),
-  ]);
-  const source = assertSupabaseResult('download staged sound source', sourceResult);
-  const playable = assertSupabaseResult('download staged playable sound', playableResult);
-  if (!source || !playable) throw new Error('Sound storage recovery failed.');
-  await Promise.all([
-    uploadWithCompensationRetries(stage.sourceStoragePath, source, stage.sourceMimeType),
-    uploadWithCompensationRetries(stage.playableStoragePath, playable, 'audio/wav'),
-  ]);
+  let source: Blob | null = null;
+  let playable: Blob | null = null;
+  try {
+    source = assertSupabaseResult(
+      'download staged sound source',
+      await storage.download(stage.stagedSourcePath),
+    );
+  } catch {
+    source = null;
+  }
+  try {
+    playable = assertSupabaseResult(
+      'download staged playable sound',
+      await storage.download(stage.stagedPlayablePath),
+    );
+  } catch {
+    playable = null;
+  }
+
+  let sourceRestored = false;
+  let playableRestored = false;
+  if (source) {
+    try {
+      await uploadWithCompensationRetries(stage.sourceStoragePath, source, stage.sourceMimeType);
+      sourceRestored = true;
+    } catch {
+      sourceRestored = false;
+    }
+  }
+  if (playable) {
+    try {
+      await uploadWithCompensationRetries(stage.playableStoragePath, playable, 'audio/wav');
+      playableRestored = true;
+    } catch {
+      playableRestored = false;
+    }
+  }
+  return { sourceRestored, playableRestored };
 }
 
 /** Removes private recovery copies after the delete either commits or rolls back. */

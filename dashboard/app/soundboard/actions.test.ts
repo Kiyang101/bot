@@ -60,6 +60,9 @@ function createDependencies(overrides: Partial<SoundboardActionDependencies> = {
     deleteSoundRow: async () => undefined,
     acquireSoundMutation: async (_soundId, _operation, token) => ({ token, mutationVersion: 1 }),
     releaseSoundMutation: async () => undefined,
+    prepareSoundTrimMutation: async () => undefined,
+    markSoundMutationRecovery: async () => undefined,
+    completeSoundMutationRecovery: async () => undefined,
     commitSoundTrim: async (input) => {
       const update = overrides.updateSound ?? (async () => ownSound);
       return update(input.soundId, {
@@ -499,6 +502,41 @@ test('delete restores staged files and leaves the row when storage deletion fail
   assert.equal(rowDeleted, false);
 });
 
+test('partial delete restore retains staging and returns a recovery-required result', async () => {
+  let discarded = false;
+  let queued = false;
+  const actions = createSoundboardActions(createDependencies({
+    deleteSoundFiles: async () => { throw new Error('storage unavailable'); },
+    restoreSoundFiles: async () => ({ sourceRestored: true, playableRestored: false }),
+    discardSoundFileStage: async () => { discarded = true; },
+    enqueueSoundCleanup: async () => { queued = true; },
+  }));
+
+  const result = await actions.deleteSound(ownSound.id);
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: 'Failed to delete sound.',
+    recoveryRequired: true,
+    warning: 'Audio cleanup could not be completed. Please retry or contact an administrator.',
+  });
+  assert.equal(discarded, false);
+  assert.equal(queued, false);
+});
+
+test('cleanup queue enqueue failure is surfaced as recovery-required', async () => {
+  const actions = createSoundboardActions(createDependencies({
+    discardSoundFileStage: async () => { throw new Error('storage unavailable'); },
+    enqueueSoundCleanup: async () => { throw new Error('database unavailable'); },
+  }));
+
+  const result = await actions.deleteSound(ownSound.id);
+
+  assert.equal(result.ok, true);
+  assert.equal('recoveryRequired' in result && result.recoveryRequired, true);
+  assert.match('warning' in result ? result.warning ?? '' : '', /cleanup/i);
+});
+
 test('trim uploads a versioned clip and removes only that staged version when the row update fails', async () => {
   const removedPaths: string[] = [];
   let uploadedPath = '';
@@ -520,6 +558,21 @@ test('trim uploads a versioned clip and removes only that staged version when th
   assert.deepEqual(result, { ok: false, message: 'Failed to trim sound.' });
   assert.deepEqual(removedPaths, [uploadedPath]);
   assert.notEqual(uploadedPath, ownSound.storagePath);
+});
+
+test('trim persists its recovery record before uploading the generated clip', async () => {
+  const events: string[] = [];
+  const actions = createSoundboardActions(createDependencies({
+    downloadSource: async () => new Blob([new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+    ])]),
+    prepareSoundTrimMutation: async () => { events.push('prepare'); },
+    uploadPlayableClip: async () => { events.push('upload'); return 'sounds/member-1/sound-own/playable-version-2'; },
+  }));
+
+  await actions.trimSound({ soundId: ownSound.id, trimStartMs: 100, trimEndMs: 500 });
+
+  assert.deepEqual(events, ['prepare', 'upload']);
 });
 
 test('upload persists server-measured playable duration instead of the browser duration', async () => {
