@@ -97,14 +97,25 @@ export interface SoundboardActionDependencies {
     lease: SoundMutationLease;
     versionId: string;
     previousPlayablePath: string;
+    sourceStoragePath: string;
+    generatedStoragePath: string;
+    trimStartMs: number;
+    trimEndMs: number;
+    sourceDurationSec: number;
+    generatedDurationSec: number;
+    sourceMimeType: string;
+    generatedMimeType: string;
+    sourceSizeBytes: number;
+    generatedSizeBytes: number;
   }) => Promise<void>;
   markSoundMutationRecovery: (input: {
     soundId: string;
     token: string;
+    operation: SoundMutationOperation;
     state: SoundMutationRecoveryState;
     lastError?: string;
   }) => Promise<void>;
-  completeSoundMutationRecovery: (input: { soundId: string; token: string }) => Promise<void>;
+  completeSoundMutationRecovery: (input: { soundId: string; token: string; operation: SoundMutationOperation }) => Promise<void>;
   commitSoundTrim: (input: {
     soundId: string;
     lease: SoundMutationLease;
@@ -115,6 +126,7 @@ export interface SoundboardActionDependencies {
   }) => Promise<SoundRecord | null>;
   commitSoundDelete: (input: { soundId: string; lease: SoundMutationLease }) => Promise<boolean>;
   enqueueSoundCleanup: (input: { soundId: string | null; objectPath: string; cleanupKind: SoundCleanupKind }) => Promise<void>;
+  reconcileSoundMutationRecoveries: () => Promise<{ processed: number; deferred: number }>;
   updateSoundOrder: (soundIds: string[]) => Promise<void>;
   trimSourceFile: (input: {
     source: Buffer | Uint8Array;
@@ -230,6 +242,9 @@ async function withDurableSoundMutation<T>(
   operation: SoundMutationOperation,
   work: (lease: SoundMutationLease) => Promise<T>,
 ): Promise<T | SoundboardActionResult> {
+  // Give expired records a bounded chance to finish before acquiring a new
+  // lease. The database CAS remains the final authority for every mutation.
+  await dependencies.reconcileSoundMutationRecoveries().catch(() => undefined);
   const token = dependencies.createSoundId();
   let lease: SoundMutationLease | null = null;
   try {
@@ -617,11 +632,22 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
               trimEndMs: trim.value.trimEndMs,
             });
             const versionId = dependencies.createSoundId();
+            const generatedStoragePath = `sounds/${sound.uploadedById}/${sound.id}/playable-${versionId}`;
             await dependencies.prepareSoundTrimMutation({
               soundId: sound.id,
               lease,
               versionId,
               previousPlayablePath: sound.storagePath,
+              sourceStoragePath: sound.sourceStoragePath,
+              generatedStoragePath,
+              trimStartMs: trim.value.trimStartMs,
+              trimEndMs: trim.value.trimEndMs,
+              sourceDurationSec: clip.sourceDurationSec,
+              generatedDurationSec: clip.durationSec,
+              sourceMimeType,
+              generatedMimeType: 'audio/wav',
+              sourceSizeBytes: sourceBytes.byteLength,
+              generatedSizeBytes: clip.buffer.byteLength,
             });
             stagedPlayablePath = await dependencies.uploadPlayableClip({
               uploadedById: sound.uploadedById,
@@ -633,6 +659,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
             await dependencies.markSoundMutationRecovery({
               soundId: sound.id,
               token: lease.token,
+              operation: 'trim',
               state: 'trim_uploaded',
             });
             const updated = await dependencies.commitSoundTrim({
@@ -643,13 +670,19 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
               durationSec: clip.durationSec,
             });
             if (!updated) {
+              await dependencies.markSoundMutationRecovery({
+                soundId: sound.id,
+                token: lease.token,
+                operation: 'trim',
+                state: 'trim_abandoned',
+              });
               const cleanup = await cleanupWithRecovery(
                 dependencies,
                 { soundId: sound.id, objectPath: stagedPlayablePath, cleanupKind: 'delete_object' },
                 () => dependencies.deleteStorageObject(stagedPlayablePath!),
               );
               if (cleanup.cleaned) {
-                await dependencies.completeSoundMutationRecovery({ soundId: sound.id, token: lease.token });
+                await dependencies.completeSoundMutationRecovery({ soundId: sound.id, token: lease.token, operation: 'trim' });
               }
               stagedPlayablePath = null;
               return addRecoveryRequired(addWarning(
@@ -665,7 +698,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
               () => dependencies.deleteStorageObject(sound.storagePath),
             );
             if (previousClipCleanup.cleaned) {
-              await dependencies.completeSoundMutationRecovery({ soundId: sound.id, token: lease.token });
+              await dependencies.completeSoundMutationRecovery({ soundId: sound.id, token: lease.token, operation: 'trim' });
             }
             revalidateSoundboard(dependencies);
             return addRecoveryRequired({
@@ -694,13 +727,18 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
               recoveryRequired ||= cleanup.recoveryRequired;
               if (cleanup.cleaned) {
                 try {
-                  await dependencies.completeSoundMutationRecovery({ soundId, token: lease.token });
+                  await dependencies.completeSoundMutationRecovery({ soundId, token: lease.token, operation: 'trim' });
                 } catch {
                   recoveryRequired = true;
                 }
               }
             }
-            return addRecoveryRequired(addWarning(actionError(error, 'Failed to trim sound.'), cleanupWarning), recoveryRequired);
+            const stagedRecoveryRequired = error instanceof Error
+              && (error as Error & { recoveryRequired?: unknown }).recoveryRequired === true;
+            return addRecoveryRequired(
+              addWarning(actionError(error, 'Failed to trim sound.'), cleanupWarning),
+              recoveryRequired || stagedRecoveryRequired,
+            );
           }
         },
       ));
@@ -774,6 +812,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
             await dependencies.markSoundMutationRecovery({
               soundId: sound.id,
               token: lease.token,
+              operation: 'delete',
               state: 'delete_objects_removed',
             });
             if (!await dependencies.commitSoundDelete({ soundId: sound.id, lease })) {
@@ -800,7 +839,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
               );
             }
             try {
-              await dependencies.completeSoundMutationRecovery({ soundId: sound.id, token: lease.token });
+              await dependencies.completeSoundMutationRecovery({ soundId: sound.id, token: lease.token, operation: 'delete' });
             } catch {
               revalidateSoundboard(dependencies);
               return { ok: true, warning: DELETE_CLEANUP_WARNING, recoveryRequired: true };
@@ -814,6 +853,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
                 await dependencies.markSoundMutationRecovery({
                   soundId: id,
                   token: lease.token,
+                  operation: 'delete',
                   state: 'restore_pending',
                   lastError: 'Delete recovery is in progress.',
                 });
@@ -879,13 +919,21 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
                 );
               }
               try {
-                await dependencies.completeSoundMutationRecovery({ soundId: id, token: lease.token });
+                await dependencies.markSoundMutationRecovery({
+                  soundId: id,
+                  token: lease.token,
+                  operation: 'delete',
+                  state: 'delete_restored',
+                });
+                await dependencies.completeSoundMutationRecovery({ soundId: id, token: lease.token, operation: 'delete' });
               } catch {
                 recoveryRequired = true;
               }
               return addRecoveryRequired(actionError(error, 'Failed to delete sound.'), recoveryRequired);
             }
-            return actionError(error, 'Failed to delete sound.');
+            const stagedRecoveryRequired = error instanceof Error
+              && (error as Error & { recoveryRequired?: unknown }).recoveryRequired === true;
+            return addRecoveryRequired(actionError(error, 'Failed to delete sound.'), stagedRecoveryRequired);
           }
         },
       ));
@@ -960,6 +1008,7 @@ async function loadDefaultDependencies(): Promise<SoundboardActionDependencies> 
       objectPath: input.objectPath,
       cleanupKind: input.cleanupKind,
     }),
+    reconcileSoundMutationRecoveries: () => sounds.reconcileSoundMutationRecoveries(),
     updateSoundOrder: sounds.updateSoundOrder,
     trimSourceFile: audio.trimSourceFile,
     sendSoundboardPlay: control.sendSoundboardPlay,

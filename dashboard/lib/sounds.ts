@@ -1,5 +1,6 @@
 import 'server-only';
 import { assertSupabaseResult } from './database';
+import { trimSourceFile } from './audio';
 import { mapSoundRow as mapValidatedSoundRow } from './sound-validation';
 import type { SoundRecord } from './sound-types';
 import { createAdminClient } from './supabase/admin';
@@ -18,6 +19,15 @@ export interface SoundFileDeletionStage {
   sourceMimeType: string;
 }
 
+export class SoundDeletionStagingError extends Error {
+  readonly recoveryRequired = true;
+
+  constructor() {
+    super('Sound deletion staging requires server recovery.');
+    this.name = 'SoundDeletionStagingError';
+  }
+}
+
 export interface SoundMutationLease {
   token: string;
   mutationVersion: number;
@@ -30,11 +40,14 @@ export type SoundMutationRecoveryState =
   | 'trim_uploading'
   | 'trim_uploaded'
   | 'trim_committed'
+  | 'trim_abandoned'
   | 'delete_staging'
   | 'delete_ready'
   | 'delete_objects_removed'
   | 'delete_committed'
-  | 'restore_pending';
+  | 'delete_restored'
+  | 'restore_pending'
+  | 'manual_required';
 
 export interface SoundMutationRecovery {
   id: string;
@@ -47,6 +60,18 @@ export interface SoundMutationRecovery {
   playableStoragePath: string | null;
   stagedSourcePath: string | null;
   stagedPlayablePath: string | null;
+  versionId: string | null;
+  generatedStoragePath: string | null;
+  trimStartMs: number | null;
+  trimEndMs: number | null;
+  sourceDurationSec: number | null;
+  generatedDurationSec: number | null;
+  sourceMimeType: string | null;
+  generatedMimeType: string | null;
+  sourceSizeBytes: number | null;
+  generatedSizeBytes: number | null;
+  attempts: number;
+  nextAttemptAt: string;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
@@ -195,15 +220,34 @@ export async function prepareSoundTrimMutation(input: {
   lease: SoundMutationLease;
   versionId: string;
   previousPlayablePath: string;
+  sourceStoragePath: string;
+  generatedStoragePath: string;
+  trimStartMs: number;
+  trimEndMs: number;
+  sourceDurationSec: number;
+  generatedDurationSec: number;
+  sourceMimeType: string;
+  generatedMimeType: string;
+  sourceSizeBytes: number;
+  generatedSizeBytes: number;
 }): Promise<void> {
   const result = await createAdminClient().rpc('prepare_sound_trim_mutation', {
     p_sound_id: input.soundId,
     p_token: input.lease.token,
     p_expected_version: input.lease.mutationVersion,
     p_version_id: input.versionId,
-    p_previous_playable_path: input.previousPlayablePath,
+    p_source_path: input.sourceStoragePath,
+    p_generated_path: input.generatedStoragePath,
+    p_trim_start_ms: input.trimStartMs,
+    p_trim_end_ms: input.trimEndMs,
+    p_source_duration_sec: input.sourceDurationSec,
+    p_generated_duration_sec: input.generatedDurationSec,
+    p_source_mime_type: input.sourceMimeType,
+    p_generated_mime_type: input.generatedMimeType,
+    p_source_size_bytes: input.sourceSizeBytes,
+    p_generated_size_bytes: input.generatedSizeBytes,
   });
-  if (!rpcBoolean(assertSupabaseResult('prepare sound trim mutation', result))) {
+  if (!rpcObject(assertSupabaseResult('prepare sound trim mutation', result))?.prepared) {
     throw new Error('Sound trim mutation is no longer current.');
   }
 }
@@ -212,6 +256,7 @@ export async function prepareSoundTrimMutation(input: {
 export async function markSoundMutationRecovery(input: {
   soundId: string;
   token: string;
+  operation: SoundMutationOperation;
   state: SoundMutationRecoveryState;
   lastError?: string;
 }): Promise<void> {
@@ -220,6 +265,7 @@ export async function markSoundMutationRecovery(input: {
     await createAdminClient().rpc('mark_sound_mutation_recovery', {
       p_sound_id: input.soundId,
       p_token: input.token,
+      p_operation: input.operation,
       p_state: input.state,
       p_last_error: input.lastError ?? null,
     }),
@@ -228,15 +274,44 @@ export async function markSoundMutationRecovery(input: {
 }
 
 /** Removes a recovery record only after all corresponding object cleanup is confirmed. */
-export async function completeSoundMutationRecovery(input: { soundId: string; token: string }): Promise<void> {
+export async function completeSoundMutationRecovery(input: { soundId: string; token: string; operation: SoundMutationOperation }): Promise<void> {
   const result = assertSupabaseResult(
     'complete sound mutation recovery',
     await createAdminClient().rpc('complete_sound_mutation_recovery', {
       p_sound_id: input.soundId,
       p_token: input.token,
+      p_operation: input.operation,
     }),
   );
   if (!rpcBoolean(result)) throw new Error('Sound mutation recovery record could not be completed.');
+}
+
+/** Claims one expired recovery for the server-side consumer. */
+export async function claimSoundMutationRecovery(input: { recoveryId: string; token: string }): Promise<boolean> {
+  const result = await createAdminClient().rpc('claim_sound_mutation_recovery', {
+    p_recovery_id: input.recoveryId,
+    p_token: input.token,
+  });
+  return rpcObject(assertSupabaseResult('claim sound mutation recovery', result))?.claimed === true;
+}
+
+/** Records a bounded retry and moves permanently failing work to manual_required. */
+export async function deferSoundMutationRecovery(input: {
+  soundId: string;
+  token: string;
+  operation: SoundMutationOperation;
+  lastError: string;
+}): Promise<boolean> {
+  return rpcBoolean(assertSupabaseResult(
+    'defer sound mutation recovery',
+    await createAdminClient().rpc('defer_sound_mutation_recovery', {
+      p_sound_id: input.soundId,
+      p_token: input.token,
+      p_operation: input.operation,
+      p_last_error: input.lastError,
+      p_max_attempts: 3,
+    }),
+  ));
 }
 
 /** Internal reconciliation input; storage paths are intentionally never serialized to clients. */
@@ -257,10 +332,199 @@ export async function listPendingSoundMutationRecoveries(): Promise<SoundMutatio
     playableStoragePath: (row.playableStoragePath ?? row.playable_storage_path ?? null) as string | null,
     stagedSourcePath: (row.stagedSourcePath ?? row.staged_source_path ?? null) as string | null,
     stagedPlayablePath: (row.stagedPlayablePath ?? row.staged_playable_path ?? null) as string | null,
+    versionId: (row.versionId ?? row.version_id ?? null) as string | null,
+    generatedStoragePath: (row.generatedStoragePath ?? row.generated_storage_path ?? null) as string | null,
+    trimStartMs: row.trimStartMs == null && row.trim_start_ms == null ? null : Number(row.trimStartMs ?? row.trim_start_ms),
+    trimEndMs: row.trimEndMs == null && row.trim_end_ms == null ? null : Number(row.trimEndMs ?? row.trim_end_ms),
+    sourceDurationSec: row.sourceDurationSec == null && row.source_duration_sec == null ? null : Number(row.sourceDurationSec ?? row.source_duration_sec),
+    generatedDurationSec: row.generatedDurationSec == null && row.generated_duration_sec == null ? null : Number(row.generatedDurationSec ?? row.generated_duration_sec),
+    sourceMimeType: (row.sourceMimeType ?? row.source_mime_type ?? null) as string | null,
+    generatedMimeType: (row.generatedMimeType ?? row.generated_mime_type ?? null) as string | null,
+    sourceSizeBytes: row.sourceSizeBytes == null && row.source_size_bytes == null ? null : Number(row.sourceSizeBytes ?? row.source_size_bytes),
+    generatedSizeBytes: row.generatedSizeBytes == null && row.generated_size_bytes == null ? null : Number(row.generatedSizeBytes ?? row.generated_size_bytes),
+    attempts: Number(row.attempts ?? 0),
+    nextAttemptAt: (row.nextAttemptAt ?? row.next_attempt_at) as string,
     lastError: (row.lastError ?? row.last_error ?? null) as string | null,
     createdAt: (row.createdAt ?? row.created_at) as string,
     updatedAt: (row.updatedAt ?? row.updated_at) as string,
   }));
+}
+
+function recoveryStage(recovery: SoundMutationRecovery): SoundFileDeletionStage {
+  if (!recovery.sourceStoragePath || !recovery.playableStoragePath || !recovery.stagedSourcePath || !recovery.stagedPlayablePath) {
+    throw new Error('Sound recovery intent is incomplete.');
+  }
+  return {
+    sourceStoragePath: recovery.sourceStoragePath,
+    playableStoragePath: recovery.playableStoragePath,
+    stagedSourcePath: recovery.stagedSourcePath,
+    stagedPlayablePath: recovery.stagedPlayablePath,
+    sourceMimeType: recovery.sourceMimeType ?? 'audio/wav',
+  };
+}
+
+async function storageObjectExists(path: string): Promise<boolean> {
+  try {
+    const result = await createAdminClient().storage.from(SOUND_BUCKET).download(path);
+    return !result.error && Boolean(result.data);
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupRecoveryObject(recovery: SoundMutationRecovery, path: string): Promise<boolean> {
+  try {
+    await deleteStorageObject(path);
+    return true;
+  } catch {
+    try {
+      await enqueueSoundCleanupTask({ soundId: recovery.soundId, objectPath: path, cleanupKind: 'delete_object' });
+    } catch {
+      return false;
+    }
+    return false;
+  }
+}
+
+async function reconcileTrimRecovery(recovery: SoundMutationRecovery): Promise<void> {
+  if (!recovery.soundId || !recovery.sourceStoragePath || !recovery.generatedStoragePath
+      || recovery.versionId === null || recovery.trimStartMs === null || recovery.trimEndMs === null
+      || recovery.sourceDurationSec === null || recovery.generatedDurationSec === null
+      || recovery.sourceMimeType === null || recovery.generatedMimeType === null
+      || recovery.sourceSizeBytes === null || recovery.generatedSizeBytes === null) {
+    throw new Error('Trim recovery intent is incomplete.');
+  }
+  const sound = await getSound(recovery.soundId);
+  if (!sound || sound.sourceStoragePath !== recovery.sourceStoragePath) {
+    const cleaned = await cleanupRecoveryObject(recovery, recovery.generatedStoragePath);
+    if (cleaned) {
+      await markSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'trim', state: 'trim_abandoned' });
+      await completeSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'trim' });
+    }
+    return;
+  }
+
+  const generatedExists = await storageObjectExists(recovery.generatedStoragePath);
+  if (!generatedExists) {
+    const sourceResult = await createAdminClient().storage.from(SOUND_BUCKET).download(recovery.sourceStoragePath);
+    const source = assertSupabaseResult('download trim recovery source', sourceResult);
+    if (!source) throw new Error('Trim recovery source is unavailable.');
+    const sourceBytes = new Uint8Array(await source.arrayBuffer());
+    const clip = await trimSourceFile({
+      source: sourceBytes,
+      mimeType: recovery.sourceMimeType,
+      trimStartMs: recovery.trimStartMs,
+      trimEndMs: recovery.trimEndMs,
+    });
+    if (Math.abs(clip.sourceDurationSec - recovery.sourceDurationSec) > 0.25
+        || Math.abs(clip.durationSec - recovery.generatedDurationSec) > 0.25
+        || clip.buffer.byteLength !== recovery.generatedSizeBytes) {
+      throw new Error('Trim recovery measurements no longer match the original intent.');
+    }
+    const clipBytes = new Uint8Array(clip.buffer.byteLength);
+    clip.buffer.copy(clipBytes);
+    await uploadWithCompensationRetries(recovery.generatedStoragePath, new Blob([clipBytes.buffer]), recovery.generatedMimeType);
+  }
+  await markSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'trim', state: 'trim_uploaded' });
+  const committed = await commitSoundTrim({
+    soundId: recovery.soundId,
+    lease: { token: recovery.token, mutationVersion: recovery.expectedVersion },
+    storagePath: recovery.generatedStoragePath,
+    trimStartMs: recovery.trimStartMs,
+    trimEndMs: recovery.trimEndMs,
+    durationSec: recovery.generatedDurationSec,
+  });
+  if (!committed) {
+    const cleaned = await cleanupRecoveryObject(recovery, recovery.generatedStoragePath);
+    if (cleaned) {
+      await markSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'trim', state: 'trim_abandoned' });
+      await completeSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'trim' });
+    }
+    return;
+  }
+  const oldClipCleaned = await cleanupRecoveryObject(recovery, recovery.playableStoragePath ?? '');
+  if (oldClipCleaned) await completeSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'trim' });
+}
+
+async function reconcileDeleteRecovery(recovery: SoundMutationRecovery): Promise<void> {
+  if (!recovery.soundId) throw new Error('Delete recovery has no sound id.');
+  const stage = recoveryStage(recovery);
+  const storage = createAdminClient().storage.from(SOUND_BUCKET);
+  const hasSourceStage = await storageObjectExists(stage.stagedSourcePath);
+  const hasPlayableStage = await storageObjectExists(stage.stagedPlayablePath);
+  if (recovery.state === 'restore_pending') {
+    const restored = await restoreSoundFiles(stage);
+    if (!(restored.sourceRestored && restored.playableRestored)) throw new Error('Delete recovery restore is incomplete.');
+    await markSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'delete', state: 'delete_restored' });
+    await discardSoundFileStage(stage);
+    await completeSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'delete' });
+    return;
+  }
+  if (!hasSourceStage) await storage.copy(stage.sourceStoragePath, stage.stagedSourcePath).then((result) => assertSupabaseResult('stage recovery source', result));
+  if (!hasPlayableStage) await storage.copy(stage.playableStoragePath, stage.stagedPlayablePath).then((result) => assertSupabaseResult('stage recovery playable', result));
+  if (recovery.state === 'delete_staging') {
+    await markSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'delete', state: 'delete_ready' });
+  }
+  if (recovery.state !== 'delete_objects_removed') {
+    await deleteSoundFiles(stage);
+    await markSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'delete', state: 'delete_objects_removed' });
+  }
+  if (!await commitSoundDelete({ soundId: recovery.soundId, lease: { token: recovery.token, mutationVersion: recovery.expectedVersion } })) {
+    const restored = await restoreSoundFiles(stage);
+    if (!(restored.sourceRestored && restored.playableRestored)) throw new Error('Delete recovery conflict could not be restored.');
+    await markSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'delete', state: 'delete_restored' });
+    await discardSoundFileStage(stage);
+    await completeSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'delete' });
+    return;
+  }
+  await discardSoundFileStage(stage);
+  await completeSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'delete' });
+}
+
+/** Bounded server-only recovery consumer. It never returns storage paths. */
+export async function reconcileSoundMutationRecoveries(limit = 10): Promise<{ processed: number; deferred: number }> {
+  const recoveries = (await listPendingSoundMutationRecoveries())
+    .filter((recovery) => recovery.state !== 'manual_required' && new Date(recovery.nextAttemptAt).getTime() <= Date.now())
+    .slice(0, Math.min(Math.max(Math.trunc(limit), 1), 50));
+  let processed = 0;
+  let deferred = 0;
+  for (const recovery of recoveries) {
+    if (!recovery.soundId) {
+      deferred += 1;
+      continue;
+    }
+    if (!await claimSoundMutationRecovery({ recoveryId: recovery.id, token: recovery.token })) continue;
+    try {
+      if (recovery.operation === 'trim') {
+        if (recovery.state === 'trim_committed' || recovery.state === 'trim_abandoned') {
+          const cleanupPath = recovery.state === 'trim_committed'
+            ? recovery.playableStoragePath
+            : recovery.generatedStoragePath;
+          if (cleanupPath && await cleanupRecoveryObject(recovery, cleanupPath)) {
+            await completeSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'trim' });
+          }
+        } else {
+          await reconcileTrimRecovery(recovery);
+        }
+      } else if (recovery.state === 'delete_committed' || recovery.state === 'delete_restored') {
+        const stage = recoveryStage(recovery);
+        await discardSoundFileStage(stage);
+        await completeSoundMutationRecovery({ soundId: recovery.soundId, token: recovery.token, operation: 'delete' });
+      } else {
+        await reconcileDeleteRecovery(recovery);
+      }
+      processed += 1;
+    } catch {
+      deferred += 1;
+      await deferSoundMutationRecovery({
+        soundId: recovery.soundId,
+        token: recovery.token,
+        operation: recovery.operation,
+        lastError: 'Server recovery attempt failed; retrying with a bounded backoff.',
+      }).catch(() => undefined);
+    }
+  }
+  return { processed, deferred };
 }
 
 /** Commits a trim only if this worker still owns the lease and row version. */
@@ -373,10 +637,9 @@ async function finalizeRecoveryAfterCleanup(
   for (const recovery of recoveries) {
     const state = recovery.state as SoundMutationRecoveryState;
     if (state === 'trim_committed' && recovery.playableStoragePath === objectPath) {
-      assertSupabaseResult(
-        'complete trimmed sound recovery',
-        await client.from('SoundMutationRecovery').delete().eq('id', recovery.id),
-      );
+      if (await claimSoundMutationRecovery({ recoveryId: recovery.id as string, token: recovery.token as string })) {
+        await completeSoundMutationRecovery({ soundId, token: recovery.token as string, operation: 'trim' });
+      }
       continue;
     }
     if (state !== 'delete_committed') continue;
@@ -389,10 +652,9 @@ async function finalizeRecoveryAfterCleanup(
       stagedPlayablePath ? storage.download(stagedPlayablePath) : Promise.resolve({ data: null, error: null }),
     ]);
     if (!sourceResult.error && sourceResult.data || !playableResult.error && playableResult.data) continue;
-    assertSupabaseResult(
-      'complete deleted sound recovery',
-      await client.from('SoundMutationRecovery').delete().eq('id', recovery.id),
-    );
+    if (await claimSoundMutationRecovery({ recoveryId: recovery.id as string, token: recovery.token as string })) {
+      await completeSoundMutationRecovery({ soundId, token: recovery.token as string, operation: 'delete' });
+    }
   }
 }
 
@@ -522,14 +784,28 @@ export async function stageSoundFilesForDeletion(input: {
       await createAdminClient().rpc('mark_sound_mutation_recovery', {
         p_sound_id: input.sound.id,
         p_token: input.lease.token,
+        p_operation: 'delete',
         p_state: 'delete_ready',
         p_last_error: null,
       }),
     );
     if (!rpcBoolean(marked)) throw new Error('Sound deletion staging record is unavailable.');
-  } catch (error) {
-    await storage.remove([staged.source, staged.playable]).catch(() => undefined);
-    throw error;
+  } catch {
+    // Never remove a partial staging copy here. The recovery row is the only
+    // durable way to finish or roll back a delete after this process exits.
+    try {
+      await createAdminClient().rpc('mark_sound_mutation_recovery', {
+        p_sound_id: input.sound.id,
+        p_token: input.lease.token,
+        p_operation: 'delete',
+        p_state: 'delete_staging',
+        p_last_error: 'Delete staging was interrupted; server recovery is required.',
+      });
+    } catch {
+      // The prepared ledger row remains authoritative even if this status
+      // update is unavailable; the caller receives a recovery-required result.
+    }
+    throw new SoundDeletionStagingError();
   }
 
   return {

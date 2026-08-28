@@ -78,6 +78,7 @@ function createDependencies(overrides: Partial<SoundboardActionDependencies> = {
       return true;
     },
     enqueueSoundCleanup: async () => undefined,
+    reconcileSoundMutationRecoveries: async () => ({ processed: 0, deferred: 0 }),
     updateSoundOrder: async () => undefined,
     trimSourceFile: async () => ({ buffer: Buffer.from('clip'), durationSec: 1, sourceDurationSec: 1 }),
     sendSoundboardPlay: async () => undefined,
@@ -573,6 +574,82 @@ test('trim persists its recovery record before uploading the generated clip', as
   await actions.trimSound({ soundId: ownSound.id, trimStartMs: 100, trimEndMs: 500 });
 
   assert.deepEqual(events, ['prepare', 'upload']);
+});
+
+test('trim persists the complete replay intent before generated upload', async () => {
+  let prepared: Record<string, unknown> | null = null;
+  const generatedPath = 'sounds/member-1/sound-own/playable-sound-new';
+  const actions = createSoundboardActions(createDependencies({
+    downloadSource: async () => new Blob([new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+    ])]),
+    prepareSoundTrimMutation: async (input) => {
+      prepared = input as unknown as Record<string, unknown>;
+    },
+    uploadPlayableClip: async () => generatedPath,
+    trimSourceFile: async () => ({ buffer: Buffer.from('measured-clip'), durationSec: 0.42, sourceDurationSec: 0.75 }),
+  }));
+
+  const result = await actions.trimSound({ soundId: ownSound.id, trimStartMs: 100, trimEndMs: 500 });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(prepared, {
+    soundId: ownSound.id,
+    lease: { token: 'sound-new', mutationVersion: 1 },
+    versionId: 'sound-new',
+    previousPlayablePath: ownSound.storagePath,
+    sourceStoragePath: ownSound.sourceStoragePath,
+    generatedStoragePath: generatedPath,
+    trimStartMs: 100,
+    trimEndMs: 500,
+    sourceDurationSec: 0.75,
+    generatedDurationSec: 0.42,
+    sourceMimeType: 'audio/wav',
+    generatedMimeType: 'audio/wav',
+    sourceSizeBytes: 12,
+    generatedSizeBytes: Buffer.byteLength('measured-clip'),
+  });
+});
+
+test('delete staging failures return recovery-required without discarding partial copies', async () => {
+  let recoveryRequired = false;
+  const stagingError = Object.assign(new Error('private storage details'), { recoveryRequired: true });
+  const actions = createSoundboardActions(createDependencies({
+    stageSoundFilesForDeletion: async () => { throw stagingError; },
+  }));
+
+  const result = await actions.deleteSound(ownSound.id);
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: 'Failed to delete sound.',
+    recoveryRequired: true,
+  });
+  recoveryRequired = result.ok === false && result.recoveryRequired === true;
+  assert.equal(recoveryRequired, true);
+});
+
+test('trim cleanup queue failure remains a sanitized recovery-required result', async () => {
+  const generatedPath = 'sounds/member-1/sound-own/playable-stale';
+  const actions = createSoundboardActions(createDependencies({
+    downloadSource: async () => new Blob([new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+    ])]),
+    uploadPlayableClip: async () => generatedPath,
+    commitSoundTrim: async () => null,
+    deleteStorageObject: async () => { throw new Error('storage path must stay private'); },
+    enqueueSoundCleanup: async () => { throw new Error('database unavailable'); },
+  }));
+
+  const result = await actions.trimSound({ soundId: ownSound.id, trimStartMs: 100, trimEndMs: 500 });
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: 'Sound changed while trim was in progress. Please retry.',
+    warning: 'Audio cleanup could not be completed. Please retry or contact an administrator.',
+    recoveryRequired: true,
+  });
+  assert.doesNotMatch(JSON.stringify(result), /sounds\//);
 });
 
 test('upload persists server-measured playable duration instead of the browser duration', async () => {
