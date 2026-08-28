@@ -4,6 +4,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useReducer,
   useState,
   type ChangeEvent,
   type DragEvent,
@@ -61,6 +62,35 @@ interface EditorMetadata {
 }
 
 type FocusAfterDelete = string | 'upload';
+
+interface SoundLibraryState {
+  sounds: ManagedSound[];
+  focusAfterDeleteId: FocusAfterDelete | null;
+}
+
+type SoundLibraryAction =
+  | { type: 'update'; update: (sounds: ManagedSound[]) => ManagedSound[] }
+  | { type: 'delete'; soundId: string }
+  | { type: 'clear-delete-focus' };
+
+function soundLibraryReducer(state: SoundLibraryState, action: SoundLibraryAction): SoundLibraryState {
+  switch (action.type) {
+    case 'update':
+      return { ...state, sounds: action.update(state.sounds) };
+    case 'delete': {
+      const deletedIndex = state.sounds.findIndex((sound) => sound.id === action.soundId);
+      if (deletedIndex < 0) return state;
+      const remaining = state.sounds.filter((sound) => sound.id !== action.soundId);
+      const focusTarget = remaining[deletedIndex] ?? remaining[deletedIndex - 1] ?? null;
+      return {
+        sounds: remaining,
+        focusAfterDeleteId: focusTarget?.id ?? 'upload',
+      };
+    }
+    case 'clear-delete-focus':
+      return state.focusAfterDeleteId === null ? state : { ...state, focusAfterDeleteId: null };
+  }
+}
 
 function revokeObjectUrl(url: string | null): void {
   if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
@@ -238,7 +268,10 @@ function MetadataFields({
 }
 
 export default function SoundManager({ initialSounds, currentUser, actions }: SoundManagerProps) {
-  const [sounds, setSounds] = useState(initialSounds);
+  const [{ sounds, focusAfterDeleteId }, dispatchLibrary] = useReducer(soundLibraryReducer, {
+    sounds: initialSounds,
+    focusAfterDeleteId: null,
+  });
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadMetadata, setUploadMetadata] = useState<EditorMetadata>({
     name: '', category: DEFAULT_CATEGORIES[0], color: COLOR_OPTIONS[0], shortcut: '', gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
@@ -254,7 +287,6 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
   const [announcement, setAnnouncement] = useState('');
   const [dragActive, setDragActive] = useState(false);
   const [previewingId, setPreviewingId] = useState<string | null>(null);
-  const [focusAfterDeleteId, setFocusAfterDeleteId] = useState<FocusAfterDelete | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadTriggerRef = useRef<HTMLButtonElement>(null);
@@ -267,8 +299,8 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
     if (!focusAfterDeleteId) return;
     if (focusAfterDeleteId === 'upload') uploadTriggerRef.current?.focus();
     else rowRefs.current.get(focusAfterDeleteId)?.focus();
-    setFocusAfterDeleteId(null);
-  }, [focusAfterDeleteId, sounds]);
+    dispatchLibrary({ type: 'clear-delete-focus' });
+  }, [focusAfterDeleteId]);
 
   useEffect(() => () => {
     revokeObjectUrl(editingSourceUrlRef.current);
@@ -287,6 +319,10 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
 
   function isPending(key: string): boolean {
     return pendingActions.has(key);
+  }
+
+  function updateSounds(update: (current: ManagedSound[]) => ManagedSound[]): void {
+    dispatchLibrary({ type: 'update', update });
   }
 
   function replaceEditingSourceUrl(url: string | null): void {
@@ -342,7 +378,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
         setError('Could not refresh the sound preview. Try again.');
         return;
       }
-      setSounds((current) => current.map((sound) => sound.id === soundId ? { ...sound, previewUrl } : sound));
+      updateSounds((current) => current.map((sound) => sound.id === soundId ? { ...sound, previewUrl } : sound));
     } catch {
       setError('Could not refresh the sound preview. Try again.');
     } finally {
@@ -406,7 +442,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       }
       const previewUrl = resultValue(previewResult);
       if (!previewUrl) return;
-      setSounds((current) => [...current, {
+      updateSounds((current) => [...current, {
         ...uploaded,
         previewUrl,
         sourcePreviewUrl: null,
@@ -463,7 +499,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       return;
     }
     const updated = resultValue(result);
-    if (updated) setSounds((current) => current.map((sound) => sound.id === updated.id ? mergeSound(sound, updated) : sound));
+    if (updated) updateSounds((current) => current.map((sound) => sound.id === updated.id ? mergeSound(sound, updated) : sound));
     setAnnouncement(`${editMetadata.name} details saved.`);
   }
 
@@ -486,7 +522,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
     if (updated) {
       const previewResult = await actions.getSoundPlayableUrl(updated.id);
       const previewUrl = resultValue(previewResult);
-      setSounds((current) => current.map((sound) => sound.id === updated.id
+      updateSounds((current) => current.map((sound) => sound.id === updated.id
         ? { ...mergeSound(sound, updated), previewUrl: previewUrl ?? sound.previewUrl }
         : sound));
       if (!previewResult.ok) setError(previewResult.message);
@@ -504,15 +540,11 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       setError(result.message);
       return;
     }
-    const remaining = sounds.filter((candidate) => candidate.id !== sound.id);
-    const deletedIndex = sounds.findIndex((candidate) => candidate.id === sound.id);
-    const focusTarget = remaining[deletedIndex] ?? remaining[deletedIndex - 1] ?? null;
-    setSounds(remaining);
+    dispatchLibrary({ type: 'delete', soundId: sound.id });
     setConfirmingDeleteId(null);
     if (editingId === sound.id) {
       closeEditor();
     }
-    setFocusAfterDeleteId(focusTarget?.id ?? 'upload');
     setAnnouncement(`${sound.name} deleted.`);
   }
 
@@ -529,7 +561,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       setError(result.message);
       return;
     }
-    setSounds(reordered);
+    updateSounds(() => reordered);
     setAnnouncement(`${reordered[nextIndex].name} moved ${direction < 0 ? 'up' : 'down'}.`);
   }
 

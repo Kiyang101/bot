@@ -248,6 +248,30 @@ describe('SoundManager', () => {
     expect(within(screen.getByTestId('sound-row-sound-own')).getByRole('heading', { name: 'Launch horn' })).toBeInTheDocument();
   });
 
+  test('applies overlapping deletes to the latest library state and focuses the latest survivor', async () => {
+    const deleteResolvers = new Map<string, (result: SoundboardActionResult) => void>();
+    const actions = successfulActions({
+      deleteSound: vi.fn((soundId): Promise<SoundboardActionResult> => new Promise((resolve) => {
+        deleteResolvers.set(soundId, resolve);
+      })),
+    });
+    render(<SoundManager initialSounds={[ownSound, otherSound, thirdSound]} currentUser={{ id: 'admin-1', role: 'admin' }} actions={actions} />);
+
+    const ownRow = screen.getByTestId('sound-row-sound-own');
+    const otherRow = screen.getByTestId('sound-row-sound-other');
+    fireEvent.click(within(ownRow).getByRole('button', { name: 'Delete Launch horn' }));
+    fireEvent.click(within(ownRow).getByRole('button', { name: 'Delete sound' }));
+    fireEvent.click(within(otherRow).getByRole('button', { name: 'Delete Airhorn' }));
+    fireEvent.click(within(otherRow).getByRole('button', { name: 'Delete sound' }));
+
+    deleteResolvers.get('sound-other')?.({ ok: true });
+    deleteResolvers.get('sound-own')?.({ ok: true });
+
+    await waitFor(() => expect(screen.queryByTestId('sound-row-sound-other')).not.toBeInTheDocument());
+    expect(screen.queryByTestId('sound-row-sound-own')).not.toBeInTheDocument();
+    expect(screen.getByTestId('sound-row-sound-third')).toHaveFocus();
+  });
+
   test('keeps delete retryable when the server action rejects', async () => {
     const actions = successfulActions({
       deleteSound: vi.fn(async () => {
