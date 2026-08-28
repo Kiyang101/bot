@@ -18,6 +18,24 @@ export interface SoundFileDeletionStage {
   sourceMimeType: string;
 }
 
+export interface SoundMutationLease {
+  token: string;
+  mutationVersion: number;
+}
+
+export type SoundMutationOperation = 'trim' | 'delete';
+export type SoundCleanupKind = 'delete_object' | 'discard_stage';
+
+export interface SoundCleanupTask {
+  id: string;
+  soundId: string | null;
+  cleanupKind: SoundCleanupKind;
+  attempts: number;
+  nextAttemptAt: string;
+  lastError: string | null;
+  createdAt: string;
+}
+
 export type NewSoundRecord = Omit<SoundRecord, 'createdAt' | 'updatedAt'>;
 export type SoundRecordUpdate = Partial<
   Pick<
@@ -50,6 +68,21 @@ function soundPath({ uploadedById, soundId }: SoundStorageIdentity, object: 'sou
 
 function isSoundPath(path: string): boolean {
   return /^sounds\/[^/\\]+\/[^/\\]+\/(source|playable(?:-[^/\\]+)?)$/.test(path);
+}
+
+function isManagedSoundPath(path: string): boolean {
+  return /^sounds\/[^/\\]+\/[^/\\]+\/(source|playable(?:-[^/\\]+)?|staging\/[^/\\]+\/(source|playable))$/.test(path);
+}
+
+function rpcObject(data: unknown): Record<string, unknown> | null {
+  if (Array.isArray(data)) return rpcObject(data[0]);
+  return data && typeof data === 'object' ? data as Record<string, unknown> : null;
+}
+
+function rpcBoolean(data: unknown): boolean {
+  if (typeof data === 'boolean') return data;
+  const object = rpcObject(data);
+  return object?.value === true || object?.deleted === true;
 }
 
 function playablePath(identity: SoundStorageIdentity, versionId: string): string {
@@ -92,6 +125,132 @@ export async function getSound(id: string): Promise<SoundRecord | null> {
   const result = await createAdminClient().from('Sound').select('*').eq('id', id).maybeSingle();
   const row = assertSupabaseResult('get sound', result);
   return row ? mapSoundRow(row) : null;
+}
+
+/** Acquires a cross-worker lease and captures the row version it protects. */
+export async function acquireSoundMutation(input: {
+  soundId: string;
+  token: string;
+  operation: SoundMutationOperation;
+}): Promise<SoundMutationLease | null> {
+  const result = await createAdminClient().rpc('acquire_sound_mutation', {
+    p_sound_id: input.soundId,
+    p_token: input.token,
+    p_operation: input.operation,
+  });
+  const value = rpcObject(assertSupabaseResult('acquire sound mutation', result));
+  if (!value || value.acquired !== true) return null;
+  const mutationVersion = Number(value.mutation_version);
+  if (!Number.isSafeInteger(mutationVersion) || mutationVersion < 0) {
+    throw new Error('acquire sound mutation: invalid mutation version.');
+  }
+  return { token: input.token, mutationVersion };
+}
+
+/** Releases a lease; expiration remains the crash-recovery fallback. */
+export async function releaseSoundMutation(input: { soundId: string; token: string }): Promise<void> {
+  assertSupabaseResult(
+    'release sound mutation',
+    await createAdminClient().rpc('release_sound_mutation', {
+      p_sound_id: input.soundId,
+      p_token: input.token,
+    }),
+  );
+}
+
+/** Commits a trim only if this worker still owns the lease and row version. */
+export async function commitSoundTrim(input: {
+  soundId: string;
+  lease: SoundMutationLease;
+  storagePath: string;
+  trimStartMs: number;
+  trimEndMs: number;
+  durationSec: number;
+}): Promise<SoundRecord | null> {
+  const result = await createAdminClient().rpc('commit_sound_trim', {
+    p_sound_id: input.soundId,
+    p_token: input.lease.token,
+    p_expected_version: input.lease.mutationVersion,
+    p_storage_path: input.storagePath,
+    p_trim_start_ms: input.trimStartMs,
+    p_trim_end_ms: input.trimEndMs,
+    p_duration_sec: input.durationSec,
+  });
+  const value = assertSupabaseResult('commit sound trim', result);
+  const row = rpcObject(value);
+  return row ? mapSoundRow(row) : null;
+}
+
+/** Deletes a row only if this worker still owns the lease and row version. */
+export async function commitSoundDelete(input: {
+  soundId: string;
+  lease: SoundMutationLease;
+}): Promise<boolean> {
+  return rpcBoolean(assertSupabaseResult(
+    'commit sound delete',
+    await createAdminClient().rpc('delete_sound_row_if_mutation', {
+      p_sound_id: input.soundId,
+      p_token: input.lease.token,
+      p_expected_version: input.lease.mutationVersion,
+    }),
+  ));
+}
+
+/** Records a server-only cleanup task without returning its storage path. */
+export async function enqueueSoundCleanupTask(input: {
+  soundId: string | null;
+  objectPath: string;
+  cleanupKind: SoundCleanupKind;
+}): Promise<void> {
+  if (!isManagedSoundPath(input.objectPath)) throw new Error('Sound cleanup path is invalid.');
+  assertSupabaseResult(
+    'enqueue sound cleanup',
+    await createAdminClient().rpc('enqueue_sound_cleanup', {
+      p_sound_id: input.soundId,
+      p_object_path: input.objectPath,
+      p_cleanup_kind: input.cleanupKind,
+    }),
+  );
+}
+
+/** Lists cleanup work for an internal worker; object paths stay server-side. */
+export async function listPendingSoundCleanupTasks(limit = 100): Promise<SoundCleanupTask[]> {
+  const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 500);
+  const result = await createAdminClient()
+    .from('SoundCleanupTask')
+    .select('id,soundId,cleanupKind,attempts,nextAttemptAt,lastError,createdAt')
+    .order('nextAttemptAt', { ascending: true })
+    .limit(boundedLimit);
+  const rows = (assertSupabaseResult('list sound cleanup tasks', result) ?? []) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: row.id as string,
+    soundId: (row.soundId ?? row.sound_id ?? null) as string | null,
+    cleanupKind: (row.cleanupKind ?? row.cleanup_kind) as SoundCleanupKind,
+    attempts: Number(row.attempts),
+    nextAttemptAt: (row.nextAttemptAt ?? row.next_attempt_at) as string,
+    lastError: (row.lastError ?? row.last_error ?? null) as string | null,
+    createdAt: (row.createdAt ?? row.created_at) as string,
+  }));
+}
+
+/** Attempts one queued object cleanup while keeping provider details server-only. */
+export async function retrySoundCleanupTask(taskId: string): Promise<boolean> {
+  const client = createAdminClient();
+  const lookup = await client.from('SoundCleanupTask').select('id,objectPath,attempts').eq('id', taskId).maybeSingle();
+  const task = assertSupabaseResult('load sound cleanup task', lookup) as { id: string; objectPath: string; attempts: number } | null;
+  if (!task) return false;
+  try {
+    await deleteStorageObject(task.objectPath);
+    assertSupabaseResult('remove completed sound cleanup task', await client.from('SoundCleanupTask').delete().eq('id', task.id));
+    return true;
+  } catch {
+    await client.from('SoundCleanupTask').update({
+      attempts: Number(task.attempts || 0) + 1,
+      nextAttemptAt: new Date(Date.now() + 60_000).toISOString(),
+      lastError: 'Storage cleanup attempt failed.',
+    }).eq('id', task.id);
+    return false;
+  }
 }
 
 /** Inserts a fully prepared global Sound row and returns the validated record. */
@@ -183,7 +342,7 @@ export async function downloadSource(input: SoundStorageIdentity): Promise<Blob>
 
 /** Removes one trusted registered object, normally an uncommitted or superseded playable clip. */
 export async function deleteStorageObject(path: string): Promise<void> {
-  if (!isSoundPath(path)) throw new Error('Sound storage path is invalid.');
+  if (!isManagedSoundPath(path)) throw new Error('Sound storage path is invalid.');
   assertSupabaseResult('delete sound storage object', await createAdminClient().storage.from(SOUND_BUCKET).remove([path]));
 }
 

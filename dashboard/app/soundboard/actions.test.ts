@@ -58,6 +58,23 @@ function createDependencies(overrides: Partial<SoundboardActionDependencies> = {
     insertSound: async () => ownSound,
     updateSound: async () => ownSound,
     deleteSoundRow: async () => undefined,
+    acquireSoundMutation: async (_soundId, _operation, token) => ({ token, mutationVersion: 1 }),
+    releaseSoundMutation: async () => undefined,
+    commitSoundTrim: async (input) => {
+      const update = overrides.updateSound ?? (async () => ownSound);
+      return update(input.soundId, {
+        storagePath: input.storagePath,
+        trimStartMs: input.trimStartMs,
+        trimEndMs: input.trimEndMs,
+        durationSec: input.durationSec,
+      });
+    },
+    commitSoundDelete: async (input) => {
+      const deleteRow = overrides.deleteSoundRow ?? (async () => undefined);
+      await deleteRow(input.soundId);
+      return true;
+    },
+    enqueueSoundCleanup: async () => undefined,
     updateSoundOrder: async () => undefined,
     trimSourceFile: async () => ({ buffer: Buffer.from('clip'), durationSec: 1, sourceDurationSec: 1 }),
     sendSoundboardPlay: async () => undefined,
@@ -580,6 +597,65 @@ test('trim retries superseded clip cleanup and reports a sanitized warning when 
   assert.doesNotMatch(JSON.stringify(result), /sounds\//);
 });
 
+test('stale trim CAS is rejected and failed generated-clip cleanup is durably queued', async () => {
+  const queued: Array<{ soundId: string | null; objectPath: string; cleanupKind: string }> = [];
+  const generatedPath = 'sounds/member-1/sound-own/playable-stale';
+  const actions = createSoundboardActions(createDependencies({
+    downloadSource: async () => new Blob([new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+    ])]),
+    uploadPlayableClip: async () => generatedPath,
+    commitSoundTrim: async () => null,
+    deleteStorageObject: async () => { throw new Error('private provider path'); },
+    enqueueSoundCleanup: async (input) => { queued.push(input); },
+  }));
+
+  const result = await actions.trimSound({ soundId: ownSound.id, trimStartMs: 100, trimEndMs: 500 });
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: 'Sound changed while trim was in progress. Please retry.',
+    warning: 'Audio cleanup could not be completed. Please retry or contact an administrator.',
+  });
+  assert.deepEqual(queued, [{ soundId: ownSound.id, objectPath: generatedPath, cleanupKind: 'delete_object' }]);
+  assert.doesNotMatch(JSON.stringify(result), /sounds\//);
+});
+
+test('stale delete CAS is rejected, restores staged files, and does not delete the row', async () => {
+  let restored = false;
+  let rowDeleteCalled = false;
+  const actions = createSoundboardActions(createDependencies({
+    commitSoundDelete: async () => false,
+    deleteSoundRow: async () => { rowDeleteCalled = true; },
+    restoreSoundFiles: async () => { restored = true; },
+  }));
+
+  const result = await actions.deleteSound(ownSound.id);
+
+  assert.deepEqual(result, { ok: false, message: 'Failed to delete sound.' });
+  assert.equal(restored, true);
+  assert.equal(rowDeleteCalled, false);
+});
+
+test('stale delete queues its superseded playable object after another trim wins', async () => {
+  let reads = 0;
+  let restored = false;
+  const queued: Array<{ objectPath: string; cleanupKind: string }> = [];
+  const currentSound = { ...ownSound, storagePath: 'sounds/member-1/sound-own/playable-new' };
+  const actions = createSoundboardActions(createDependencies({
+    getSound: async () => (++reads < 3 ? ownSound : currentSound),
+    commitSoundDelete: async () => false,
+    restoreSoundFiles: async () => { restored = true; },
+    enqueueSoundCleanup: async ({ objectPath, cleanupKind }) => { queued.push({ objectPath, cleanupKind }); },
+  }));
+
+  const result = await actions.deleteSound(ownSound.id);
+
+  assert.deepEqual(result, { ok: false, message: 'Failed to delete sound.' });
+  assert.equal(restored, true);
+  assert.deepEqual(queued, [{ objectPath: ownSound.storagePath, cleanupKind: 'delete_object' }]);
+});
+
 test('delete retries staging cleanup and reports a sanitized warning after the row is removed', async () => {
   let discardAttempts = 0;
   const actions = createSoundboardActions(createDependencies({
@@ -803,6 +879,23 @@ test('serializes trim and delete so delete stages the committed playable clip', 
   assert.equal(trimResult.ok, true);
   assert.equal(deleteResult.ok, true);
   assert.deepEqual(stagedPaths, ['sounds/member-1/sound-own/playable-version-2']);
+});
+
+test('trim and delete acquire durable per-sound coordination before storage work', async () => {
+  const acquired: string[] = [];
+  const dependencies = createDependencies({
+    acquireSoundMutation: async (soundId: string, _operation: 'trim' | 'delete', token: string) => {
+      acquired.push(`${soundId}:${token}`);
+      return { token, mutationVersion: 1 };
+    },
+  } as Partial<SoundboardActionDependencies>);
+  const actions = createSoundboardActions(dependencies);
+
+  await actions.trimSound({ soundId: ownSound.id, trimStartMs: 0, trimEndMs: 400 });
+  await actions.deleteSound(ownSound.id);
+
+  assert.equal(acquired.length, 2);
+  assert.equal(acquired.every((item) => item.startsWith(`${ownSound.id}:`)), true);
 });
 
 test('a shortcut uniqueness race is sanitized and identifies the newly conflicting sound', async () => {

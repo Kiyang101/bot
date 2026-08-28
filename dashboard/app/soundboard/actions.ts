@@ -12,7 +12,14 @@ import {
   validateUploadMeta,
 } from '../../lib/sound-validation';
 import type { SoundMutationResult, SoundRecord } from '../../lib/sound-types';
-import type { NewSoundRecord, SoundFileDeletionStage, SoundRecordUpdate } from '../../lib/sounds';
+import type {
+  NewSoundRecord,
+  SoundCleanupKind,
+  SoundFileDeletionStage,
+  SoundMutationLease,
+  SoundMutationOperation,
+  SoundRecordUpdate,
+} from '../../lib/sounds';
 import { SoundboardBusyError, type SoundboardPlayPayload } from '../../lib/control';
 import { detectSupportedAudioMimeType } from '../../lib/audio';
 
@@ -80,6 +87,18 @@ export interface SoundboardActionDependencies {
   insertSound: (input: NewSoundRecord) => Promise<SoundRecord>;
   updateSound: (id: string, input: SoundRecordUpdate) => Promise<SoundRecord>;
   deleteSoundRow: (id: string) => Promise<void>;
+  acquireSoundMutation: (soundId: string, operation: SoundMutationOperation, token: string) => Promise<SoundMutationLease | null>;
+  releaseSoundMutation: (soundId: string, token: string) => Promise<void>;
+  commitSoundTrim: (input: {
+    soundId: string;
+    lease: SoundMutationLease;
+    storagePath: string;
+    trimStartMs: number;
+    trimEndMs: number;
+    durationSec: number;
+  }) => Promise<SoundRecord | null>;
+  commitSoundDelete: (input: { soundId: string; lease: SoundMutationLease }) => Promise<boolean>;
+  enqueueSoundCleanup: (input: { soundId: string | null; objectPath: string; cleanupKind: SoundCleanupKind }) => Promise<void>;
   updateSoundOrder: (soundIds: string[]) => Promise<void>;
   trimSourceFile: (input: {
     source: Buffer | Uint8Array;
@@ -131,6 +150,32 @@ async function retryCleanup(cleanup: () => Promise<void>): Promise<boolean> {
   return false;
 }
 
+async function cleanupWithRecovery(
+  dependencies: SoundboardActionDependencies,
+  input: { soundId: string | null; objectPath: string; cleanupKind: SoundCleanupKind },
+  cleanup: () => Promise<void>,
+): Promise<boolean> {
+  if (await retryCleanup(cleanup)) return true;
+  try {
+    await dependencies.enqueueSoundCleanup(input);
+  } catch {
+    // The user-facing warning remains generic; the task can be retried by the
+    // cleanup worker whenever the database is available again.
+  }
+  return false;
+}
+
+async function enqueueCleanupQuietly(
+  dependencies: SoundboardActionDependencies,
+  input: { soundId: string | null; objectPath: string; cleanupKind: SoundCleanupKind },
+): Promise<void> {
+  try {
+    await dependencies.enqueueSoundCleanup(input);
+  } catch {
+    // Cleanup warnings remain sanitized if the durable queue is unavailable.
+  }
+}
+
 function addWarning<T>(result: SoundboardActionResult<T>, warning: string | null): SoundboardActionResult<T> {
   return warning ? { ...result, warning } : result;
 }
@@ -146,6 +191,32 @@ async function withSoundMutationLock<T>(soundId: string, work: () => Promise<T>)
   } finally {
     release();
     if (soundMutationLocks.get(soundId) === current) soundMutationLocks.delete(soundId);
+  }
+}
+
+async function withDurableSoundMutation<T>(
+  dependencies: SoundboardActionDependencies,
+  soundId: string,
+  operation: SoundMutationOperation,
+  work: (lease: SoundMutationLease) => Promise<T>,
+): Promise<T | SoundboardActionResult> {
+  const token = dependencies.createSoundId();
+  let lease: SoundMutationLease | null = null;
+  try {
+    lease = await dependencies.acquireSoundMutation(soundId, operation, token);
+  } catch {
+    return { ok: false, message: 'Sound mutation coordination is unavailable. Please retry.' };
+  }
+  if (!lease) return { ok: false, message: 'Sound is being updated. Please retry.' };
+
+  try {
+    return await work(lease);
+  } finally {
+    try {
+      await dependencies.releaseSoundMutation(soundId, lease.token);
+    } catch {
+      // The lease expires automatically if release is unavailable.
+    }
   }
 }
 
@@ -429,7 +500,11 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       } catch (error) {
         let cleanupWarning: string | null = null;
         for (const path of uploadedPaths.reverse()) {
-          if (!await retryCleanup(() => dependencies.deleteStorageObject(path))) cleanupWarning = CLEANUP_WARNING;
+          if (!await cleanupWithRecovery(
+            dependencies,
+            { soundId, objectPath: path, cleanupKind: 'delete_object' },
+            () => dependencies.deleteStorageObject(path),
+          )) cleanupWarning = CLEANUP_WARNING;
         }
         const race = await shortcutRaceResult(dependencies, error, metadata.value.shortcut);
         if (race) return addWarning(race, cleanupWarning);
@@ -477,50 +552,84 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const trim = normalizeTrimRequest(input);
       if (!trim.ok) return trim;
 
-      return withSoundMutationLock(soundId, async () => {
-        let stagedPlayablePath: string | null = null;
-        try {
-          const sound = await dependencies.getSound(soundId);
-          if (!sound) return { ok: false, message: 'Sound not found.' };
-          const authorization = authorizeSoundMutation(user, sound);
-          if (authorization) return authorization;
-          const source = await dependencies.downloadSource({ uploadedById: sound.uploadedById, soundId: sound.id });
-          const sourceBytes = new Uint8Array(await source.arrayBuffer());
-          const sourceMimeType = detectSupportedAudioMimeType(sourceBytes);
-          if (!sourceMimeType) return { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' };
-          const clip = await dependencies.trimSourceFile({
-            source: sourceBytes,
-            mimeType: sourceMimeType,
-            trimStartMs: trim.value.trimStartMs,
-            trimEndMs: trim.value.trimEndMs,
-          });
-          stagedPlayablePath = await dependencies.uploadPlayableClip({
-            uploadedById: sound.uploadedById,
-            soundId: sound.id,
-            file: clip.buffer,
-            mimeType: 'audio/wav',
-            versionId: dependencies.createSoundId(),
-          });
-          const updated = await dependencies.updateSound(sound.id, {
-            storagePath: stagedPlayablePath,
-            ...trim.value,
-            durationSec: clip.durationSec,
-          });
-          stagedPlayablePath = null;
-          const previousClipDeleted = await retryCleanup(() => dependencies.deleteStorageObject(sound.storagePath));
-          revalidateSoundboard(dependencies);
-          return {
-            ok: true,
-            value: asClientSound(updated),
-            ...(previousClipDeleted ? {} : { warning: DELETE_CLEANUP_WARNING }),
-          };
-        } catch (error) {
-          const cleanupWarning = stagedPlayablePath && !await retryCleanup(
-            () => dependencies.deleteStorageObject(stagedPlayablePath!),
-          ) ? CLEANUP_WARNING : null;
-          return addWarning(actionError(error, 'Failed to trim sound.'), cleanupWarning);
-        }
-      });
+      try {
+        const sound = await dependencies.getSound(soundId);
+        if (!sound) return { ok: false, message: 'Sound not found.' };
+        const authorization = authorizeSoundMutation(user, sound);
+        if (authorization) return authorization;
+      } catch (error) {
+        return actionError(error, 'Failed to trim sound.');
+      }
+
+      return withSoundMutationLock(soundId, () => withDurableSoundMutation(
+        dependencies,
+        soundId,
+        'trim',
+        async (lease) => {
+          let stagedPlayablePath: string | null = null;
+          try {
+            const sound = await dependencies.getSound(soundId);
+            if (!sound) return { ok: false, message: 'Sound not found.' };
+            const authorization = authorizeSoundMutation(user, sound);
+            if (authorization) return authorization;
+            const source = await dependencies.downloadSource({ uploadedById: sound.uploadedById, soundId: sound.id });
+            const sourceBytes = new Uint8Array(await source.arrayBuffer());
+            const sourceMimeType = detectSupportedAudioMimeType(sourceBytes);
+            if (!sourceMimeType) return { ok: false, message: 'Sound must be an MP3, WAV, or OGG file.' };
+            const clip = await dependencies.trimSourceFile({
+              source: sourceBytes,
+              mimeType: sourceMimeType,
+              trimStartMs: trim.value.trimStartMs,
+              trimEndMs: trim.value.trimEndMs,
+            });
+            stagedPlayablePath = await dependencies.uploadPlayableClip({
+              uploadedById: sound.uploadedById,
+              soundId: sound.id,
+              file: clip.buffer,
+              mimeType: 'audio/wav',
+              versionId: dependencies.createSoundId(),
+            });
+            const updated = await dependencies.commitSoundTrim({
+              soundId: sound.id,
+              lease,
+              storagePath: stagedPlayablePath,
+              ...trim.value,
+              durationSec: clip.durationSec,
+            });
+            if (!updated) {
+              const cleanupWarning = await cleanupWithRecovery(
+                dependencies,
+                { soundId: sound.id, objectPath: stagedPlayablePath, cleanupKind: 'delete_object' },
+                () => dependencies.deleteStorageObject(stagedPlayablePath!),
+              ) ? null : CLEANUP_WARNING;
+              stagedPlayablePath = null;
+              return addWarning(
+                { ok: false, message: 'Sound changed while trim was in progress. Please retry.' },
+                cleanupWarning,
+              );
+            }
+            stagedPlayablePath = null;
+            const previousClipDeleted = await cleanupWithRecovery(
+              dependencies,
+              { soundId: sound.id, objectPath: sound.storagePath, cleanupKind: 'delete_object' },
+              () => dependencies.deleteStorageObject(sound.storagePath),
+            );
+            revalidateSoundboard(dependencies);
+            return {
+              ok: true,
+              value: asClientSound(updated),
+              ...(previousClipDeleted ? {} : { warning: DELETE_CLEANUP_WARNING }),
+            };
+          } catch (error) {
+            const cleanupWarning = stagedPlayablePath && !await cleanupWithRecovery(
+              dependencies,
+              { soundId: soundId, objectPath: stagedPlayablePath, cleanupKind: 'delete_object' },
+              () => dependencies.deleteStorageObject(stagedPlayablePath!),
+            ) ? CLEANUP_WARNING : null;
+            return addWarning(actionError(error, 'Failed to trim sound.'), cleanupWarning);
+          }
+        },
+      ));
     },
 
     async getSoundPlayableUrl(soundId: string): Promise<SoundboardActionResult<string>> {
@@ -559,38 +668,110 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const id = validSoundId(soundId);
       if (!id) return { ok: false, message: 'Sound id is required.' };
 
-      return withSoundMutationLock(id, async () => {
-        let stage: SoundFileDeletionStage | null = null;
-        let rowDeleted = false;
-        try {
-          const sound = await dependencies.getSound(id);
-          if (!sound) return { ok: false, message: 'Sound not found.' };
-          const authorization = authorizeSoundMutation(user, sound);
-          if (authorization) return authorization;
-          stage = await dependencies.stageSoundFilesForDeletion({ sound, stageId: dependencies.createSoundId() });
-          await dependencies.deleteSoundFiles(stage);
-          await dependencies.deleteSoundRow(sound.id);
-          rowDeleted = true;
-          if (!await retryCleanup(() => dependencies.discardSoundFileStage(stage!))) {
+      try {
+        const sound = await dependencies.getSound(id);
+        if (!sound) return { ok: false, message: 'Sound not found.' };
+        const authorization = authorizeSoundMutation(user, sound);
+        if (authorization) return authorization;
+      } catch (error) {
+        return actionError(error, 'Failed to delete sound.');
+      }
+
+      return withSoundMutationLock(id, () => withDurableSoundMutation(
+        dependencies,
+        id,
+        'delete',
+        async (lease) => {
+          let stage: SoundFileDeletionStage | null = null;
+          let originalSound: SoundRecord | null = null;
+          let rowDeleted = false;
+          try {
+            const sound = await dependencies.getSound(id);
+            if (!sound) return { ok: false, message: 'Sound not found.' };
+            originalSound = sound;
+            const authorization = authorizeSoundMutation(user, sound);
+            if (authorization) return authorization;
+            stage = await dependencies.stageSoundFilesForDeletion({ sound, stageId: dependencies.createSoundId() });
+            await dependencies.deleteSoundFiles(stage);
+            if (!await dependencies.commitSoundDelete({ soundId: sound.id, lease })) {
+              throw new Error('Sound changed while delete was in progress.');
+            }
+            rowDeleted = true;
+            const stagedFilesDiscarded = await cleanupWithRecovery(
+              dependencies,
+              { soundId: sound.id, objectPath: stage.stagedSourcePath, cleanupKind: 'discard_stage' },
+              async () => {
+                await dependencies.discardSoundFileStage(stage!);
+              },
+            );
+            if (!stagedFilesDiscarded) {
+              // The paired discard operation covers both stage paths. The
+              // source path is also queued so a worker can retry the pair.
+              await enqueueCleanupQuietly(dependencies, {
+                soundId: sound.id,
+                objectPath: stage.stagedPlayablePath,
+                cleanupKind: 'discard_stage',
+              });
+              revalidateSoundboard(dependencies);
+              return { ok: true, warning: DELETE_CLEANUP_WARNING };
+            }
             revalidateSoundboard(dependencies);
-            return { ok: true, warning: DELETE_CLEANUP_WARNING };
-          }
-          revalidateSoundboard(dependencies);
-          return { ok: true };
-        } catch (error) {
-          if (stage && !rowDeleted) {
-            const restored = await retryCleanup(() => dependencies.restoreSoundFiles(stage!));
-            if (!restored) {
-              return { ok: false, message: 'Failed to delete sound.', warning: CLEANUP_WARNING };
+            return { ok: true };
+          } catch (error) {
+            if (stage && !rowDeleted) {
+              const restored = await retryCleanup(() => dependencies.restoreSoundFiles(stage!));
+              if (!restored) {
+                await enqueueCleanupQuietly(dependencies, {
+                  soundId: id,
+                  objectPath: stage.stagedSourcePath,
+                  cleanupKind: 'discard_stage',
+                });
+                await enqueueCleanupQuietly(dependencies, {
+                  soundId: id,
+                  objectPath: stage.stagedPlayablePath,
+                  cleanupKind: 'discard_stage',
+                });
+                return { ok: false, message: 'Failed to delete sound.', warning: CLEANUP_WARNING };
+              }
+              if (originalSound) {
+                const currentSound = await dependencies.getSound(id).catch(() => null);
+                if (!currentSound) {
+                  await enqueueCleanupQuietly(dependencies, {
+                    soundId: id,
+                    objectPath: originalSound.sourceStoragePath,
+                    cleanupKind: 'delete_object',
+                  });
+                  await enqueueCleanupQuietly(dependencies, {
+                    soundId: id,
+                    objectPath: originalSound.storagePath,
+                    cleanupKind: 'delete_object',
+                  });
+                } else if (currentSound.storagePath !== originalSound.storagePath) {
+                  await enqueueCleanupQuietly(dependencies, {
+                    soundId: id,
+                    objectPath: originalSound.storagePath,
+                    cleanupKind: 'delete_object',
+                  });
+                }
+              }
+              const stageDiscarded = await cleanupWithRecovery(
+                dependencies,
+                { soundId: id, objectPath: stage.stagedSourcePath, cleanupKind: 'discard_stage' },
+                () => dependencies.discardSoundFileStage(stage!),
+              );
+              if (!stageDiscarded) {
+                await enqueueCleanupQuietly(dependencies, {
+                  soundId: id,
+                  objectPath: stage.stagedPlayablePath,
+                  cleanupKind: 'discard_stage',
+                });
+                return { ok: false, message: 'Failed to delete sound.', warning: CLEANUP_WARNING };
+              }
             }
-            const stageDiscarded = await retryCleanup(() => dependencies.discardSoundFileStage(stage!));
-            if (!stageDiscarded) {
-              return { ok: false, message: 'Failed to delete sound.', warning: CLEANUP_WARNING };
-            }
+            return actionError(error, 'Failed to delete sound.');
           }
-          return actionError(error, 'Failed to delete sound.');
-        }
-      });
+        },
+      ));
     },
 
     async reorderSounds(soundIds: string[]): Promise<SoundboardActionResult> {
@@ -650,6 +831,15 @@ async function loadDefaultDependencies(): Promise<SoundboardActionDependencies> 
     insertSound: sounds.insertSound,
     updateSound: sounds.updateSound,
     deleteSoundRow: sounds.deleteSoundRow,
+    acquireSoundMutation: async (soundId, operation, token) => sounds.acquireSoundMutation({ soundId, operation, token }),
+    releaseSoundMutation: async (soundId, token) => sounds.releaseSoundMutation({ soundId, token }),
+    commitSoundTrim: sounds.commitSoundTrim,
+    commitSoundDelete: sounds.commitSoundDelete,
+    enqueueSoundCleanup: async (input) => sounds.enqueueSoundCleanupTask({
+      soundId: input.soundId,
+      objectPath: input.objectPath,
+      cleanupKind: input.cleanupKind,
+    }),
     updateSoundOrder: sounds.updateSoundOrder,
     trimSourceFile: audio.trimSourceFile,
     sendSoundboardPlay: control.sendSoundboardPlay,
