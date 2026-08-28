@@ -10,6 +10,14 @@ const SIGNED_URL_TTL_SECONDS = 60 * 5;
 type StorageFile = Blob | ArrayBuffer | Uint8Array;
 type SoundStorageIdentity = { uploadedById: string; soundId: string };
 
+export interface SoundFileDeletionStage {
+  sourceStoragePath: string;
+  playableStoragePath: string;
+  stagedSourcePath: string;
+  stagedPlayablePath: string;
+  sourceMimeType: string;
+}
+
 export type NewSoundRecord = Omit<SoundRecord, 'createdAt' | 'updatedAt'>;
 export type SoundRecordUpdate = Partial<
   Pick<
@@ -21,6 +29,7 @@ export type SoundRecordUpdate = Partial<
     | 'gainDb'
     | 'fadeInMs'
     | 'fadeOutMs'
+    | 'storagePath'
     | 'trimStartMs'
     | 'trimEndMs'
     | 'durationSec'
@@ -40,7 +49,28 @@ function soundPath({ uploadedById, soundId }: SoundStorageIdentity, object: 'sou
 }
 
 function isSoundPath(path: string): boolean {
-  return /^sounds\/[^/\\]+\/[^/\\]+\/(source|playable)$/.test(path);
+  return /^sounds\/[^/\\]+\/[^/\\]+\/(source|playable(?:-[^/\\]+)?)$/.test(path);
+}
+
+function playablePath(identity: SoundStorageIdentity, versionId: string): string {
+  return `${soundPath(identity, 'playable')}-${requireStorageIdentifier(versionId, 'Playable version id')}`;
+}
+
+function deletionStagePaths(identity: SoundStorageIdentity, stageId: string) {
+  const prefix = `sounds/${requireStorageIdentifier(identity.uploadedById, 'Uploader id')}/${requireStorageIdentifier(identity.soundId, 'Sound id')}/staging/${requireStorageIdentifier(stageId, 'Stage id')}`;
+  return { source: `${prefix}/source`, playable: `${prefix}/playable` };
+}
+
+function requireRecordStoragePath(path: string, identity: SoundStorageIdentity, object: 'source' | 'playable'): string {
+  const expectedSource = soundPath(identity, 'source');
+  const expectedPlayablePrefix = `${soundPath(identity, 'playable')}-`;
+  if (
+    (object === 'source' && path !== expectedSource)
+    || (object === 'playable' && path !== soundPath(identity, 'playable') && !path.startsWith(expectedPlayablePrefix))
+  ) {
+    throw new Error('Sound storage path is invalid.');
+  }
+  return path;
 }
 
 /** Maps raw server-only Sound rows to the client-safe domain record. */
@@ -88,14 +118,11 @@ export async function deleteSoundRow(id: string): Promise<void> {
   assertSupabaseResult('delete sound row', await createAdminClient().from('Sound').delete().eq('id', id));
 }
 
-/** Persists one position in a sequential global sound ordering batch. */
-export async function updateSoundSortOrder(id: string, sortOrder: number): Promise<void> {
+/** Persists the complete global order in one database transaction. */
+export async function updateSoundOrder(soundIds: string[]): Promise<void> {
   assertSupabaseResult(
-    'update sound sort order',
-    await createAdminClient()
-      .from('Sound')
-      .update({ sortOrder, updatedAt: new Date().toISOString() })
-      .eq('id', id),
+    'update sound order',
+    await createAdminClient().rpc('reorder_sounds', { sound_ids: soundIds }),
   );
 }
 
@@ -135,14 +162,14 @@ export async function uploadSource(input: SoundStorageIdentity & { file: Storage
   return path;
 }
 
-/** Replaces only the derived playable object after successful processing. */
-export async function replacePlayableClip(input: SoundStorageIdentity & { file: StorageFile; mimeType?: string }): Promise<string> {
-  const path = soundPath(input, 'playable');
+/** Uploads a new immutable derived clip; the row is switched to it only after this succeeds. */
+export async function uploadPlayableClip(input: SoundStorageIdentity & { file: StorageFile; mimeType?: string; versionId: string }): Promise<string> {
+  const path = playablePath(input, input.versionId);
   const result = await createAdminClient().storage.from(SOUND_BUCKET).upload(path, input.file, {
     contentType: input.mimeType ?? 'audio/wav',
-    upsert: true,
+    upsert: false,
   });
-  assertSupabaseResult('replace playable sound clip', result);
+  assertSupabaseResult('upload playable sound clip', result);
   return path;
 }
 
@@ -154,11 +181,85 @@ export async function downloadSource(input: SoundStorageIdentity): Promise<Blob>
   return source;
 }
 
-/** Removes both internal storage objects belonging to a sound. */
-export async function deleteSoundFiles(input: SoundStorageIdentity): Promise<void> {
+/** Removes one trusted registered object, normally an uncommitted or superseded playable clip. */
+export async function deleteStorageObject(path: string): Promise<void> {
+  if (!isSoundPath(path)) throw new Error('Sound storage path is invalid.');
+  assertSupabaseResult('delete sound storage object', await createAdminClient().storage.from(SOUND_BUCKET).remove([path]));
+}
+
+/** Copies both live objects to private staging paths before a destructive delete begins. */
+export async function stageSoundFilesForDeletion(input: {
+  sound: Pick<SoundRecord, 'id' | 'uploadedById' | 'sourceStoragePath' | 'storagePath' | 'mimeType'>;
+  stageId: string;
+}): Promise<SoundFileDeletionStage> {
+  const identity = { uploadedById: input.sound.uploadedById, soundId: input.sound.id };
+  const sourceStoragePath = requireRecordStoragePath(input.sound.sourceStoragePath, identity, 'source');
+  const playableStoragePath = requireRecordStoragePath(input.sound.storagePath, identity, 'playable');
+  const staged = deletionStagePaths(identity, input.stageId);
+  const storage = createAdminClient().storage.from(SOUND_BUCKET);
+
+  try {
+    assertSupabaseResult('stage sound source', await storage.copy(sourceStoragePath, staged.source));
+    assertSupabaseResult('stage playable sound', await storage.copy(playableStoragePath, staged.playable));
+  } catch (error) {
+    await storage.remove([staged.source, staged.playable]).catch(() => undefined);
+    throw error;
+  }
+
+  return {
+    sourceStoragePath,
+    playableStoragePath,
+    stagedSourcePath: staged.source,
+    stagedPlayablePath: staged.playable,
+    sourceMimeType: input.sound.mimeType,
+  };
+}
+
+/** Removes both live objects only after recoverable staging has completed. */
+export async function deleteSoundFiles(stage: SoundFileDeletionStage): Promise<void> {
   const result = await createAdminClient().storage.from(SOUND_BUCKET).remove([
-    soundPath(input, 'source'),
-    soundPath(input, 'playable'),
+    stage.sourceStoragePath,
+    stage.playableStoragePath,
   ]);
   assertSupabaseResult('delete sound files', result);
+}
+
+async function uploadWithCompensationRetries(path: string, file: Blob, mimeType: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const result = await createAdminClient().storage.from(SOUND_BUCKET).upload(path, file, {
+      contentType: mimeType,
+      upsert: true,
+    });
+    if (!result.error) return;
+    lastError = result.error;
+  }
+  throw lastError instanceof Error ? lastError : new Error('Sound storage recovery failed.');
+}
+
+/** Restores both live objects from staging when storage or row deletion fails. */
+export async function restoreSoundFiles(stage: SoundFileDeletionStage): Promise<void> {
+  const storage = createAdminClient().storage.from(SOUND_BUCKET);
+  const [sourceResult, playableResult] = await Promise.all([
+    storage.download(stage.stagedSourcePath),
+    storage.download(stage.stagedPlayablePath),
+  ]);
+  const source = assertSupabaseResult('download staged sound source', sourceResult);
+  const playable = assertSupabaseResult('download staged playable sound', playableResult);
+  if (!source || !playable) throw new Error('Sound storage recovery failed.');
+  await Promise.all([
+    uploadWithCompensationRetries(stage.sourceStoragePath, source, stage.sourceMimeType),
+    uploadWithCompensationRetries(stage.playableStoragePath, playable, 'audio/wav'),
+  ]);
+}
+
+/** Removes private recovery copies after the delete either commits or rolls back. */
+export async function discardSoundFileStage(stage: SoundFileDeletionStage): Promise<void> {
+  assertSupabaseResult(
+    'discard staged sound files',
+    await createAdminClient().storage.from(SOUND_BUCKET).remove([
+      stage.stagedSourcePath,
+      stage.stagedPlayablePath,
+    ]),
+  );
 }

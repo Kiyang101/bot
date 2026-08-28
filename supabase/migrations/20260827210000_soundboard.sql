@@ -22,13 +22,15 @@ CREATE TABLE public."Sound" (
   "trimEndMs" integer NOT NULL CHECK (
     "trimEndMs" > "trimStartMs"
     AND "trimEndMs" - "trimStartMs" >= 100
-    AND ("durationSec" IS NULL OR "trimEndMs" <= "durationSec" * 1000)
   ),
   "sortOrder" integer NOT NULL DEFAULT 0,
   "createdAt" timestamp(3) without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updatedAt" timestamp(3) without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT "Sound_storagePath_contract"
-    CHECK ("storagePath" = 'sounds/' || "uploadedById" || '/' || id::text || '/playable'),
+    CHECK (
+      "storagePath" = 'sounds/' || "uploadedById" || '/' || id::text || '/playable'
+      OR "storagePath" LIKE 'sounds/' || "uploadedById" || '/' || id::text || '/playable-%'
+    ),
   CONSTRAINT "Sound_sourceStoragePath_contract"
     CHECK ("sourceStoragePath" = 'sounds/' || "uploadedById" || '/' || id::text || '/source')
 );

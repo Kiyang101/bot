@@ -154,7 +154,11 @@ async function readDurationSeconds(filePath: string): Promise<number> {
 }
 
 /** Trims a retained source into a normalized, bounded WAV clip without modifying the source. */
-export async function trimSourceFile(input: TrimSourceFileInput): Promise<{ buffer: Buffer; durationSec: number }> {
+export async function trimSourceFile(input: TrimSourceFileInput): Promise<{
+  buffer: Buffer;
+  durationSec: number;
+  sourceDurationSec: number;
+}> {
   const uploadMeta = validateUploadMeta('source', input.mimeType, input.source.length);
   if (!uploadMeta.ok) throw new Error(uploadMeta.message);
   if (!detectSupportedAudioMimeType(input.source)) throw new Error(UNSUPPORTED_AUDIO_MESSAGE);
@@ -200,7 +204,7 @@ export async function trimSourceFile(input: TrimSourceFileInput): Promise<{ buff
       throw new Error(INVALID_AUDIO_MESSAGE);
     }
     const durationSec = await readDurationSeconds(playablePath);
-    return { buffer: await readFile(playablePath), durationSec };
+    return { buffer: await readFile(playablePath), durationSec, sourceDurationSec };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

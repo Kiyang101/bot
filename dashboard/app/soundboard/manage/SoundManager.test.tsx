@@ -33,7 +33,7 @@ const ownSound: ManagedSound = {
   createdAt: '2026-08-20T10:00:00.000Z',
   updatedAt: '2026-08-20T10:00:00.000Z',
   previewUrl: 'https://signed.example/own-playable',
-  sourcePreviewUrl: 'https://signed.example/own-source',
+  sourcePreviewUrl: null,
 };
 
 const otherSound: ManagedSound = {
@@ -45,7 +45,7 @@ const otherSound: ManagedSound = {
   shortcut: null,
   sortOrder: 1,
   previewUrl: 'https://signed.example/other-playable',
-  sourcePreviewUrl: 'https://signed.example/other-source',
+  sourcePreviewUrl: null,
 };
 
 function successfulActions(overrides: Partial<SoundManagerActions> = {}): SoundManagerActions {
@@ -55,6 +55,8 @@ function successfulActions(overrides: Partial<SoundManagerActions> = {}): SoundM
     trimSound: vi.fn(async () => ({ ok: true as const, value: ownSound as SoundboardSound })),
     deleteSound: vi.fn(async () => ({ ok: true as const })),
     reorderSounds: vi.fn(async () => ({ ok: true as const })),
+    getSoundPlayableUrl: vi.fn(async () => ({ ok: true as const, value: 'https://signed.example/refreshed-playable' })),
+    getSoundSourceUrl: vi.fn(async () => ({ ok: true as const, value: 'https://signed.example/refreshed-source' })),
     ...overrides,
   };
 }
@@ -109,6 +111,41 @@ describe('SoundManager', () => {
     }));
   });
 
+  test('requests the protected source URL only when trim editing begins', async () => {
+    const actions = successfulActions();
+    render(<SoundManager initialSounds={[ownSound]} currentUser={{ id: 'user-1', role: 'member' }} actions={actions} />);
+
+    expect(actions.getSoundSourceUrl).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Launch horn' }));
+
+    await screen.findByLabelText('Audio waveform');
+    expect(actions.getSoundSourceUrl).toHaveBeenCalledWith('sound-own');
+  });
+
+  test('uses a signed generated playable URL after upload instead of a local source URL', async () => {
+    const actions = successfulActions();
+    const user = userEvent.setup();
+    render(<SoundManager initialSounds={[]} currentUser={{ id: 'user-1', role: 'member' }} actions={actions} />);
+    await user.upload(screen.getByLabelText('Choose MP3, WAV, or OGG file'), new File([new Uint8Array(32)], 'launch.wav', { type: 'audio/wav' }));
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Upload sound' })).at(-1)!);
+
+    const preview = await screen.findByLabelText('Preview Launch horn');
+    expect(preview).toHaveAttribute('src', 'https://signed.example/refreshed-playable');
+  });
+
+  test('refreshes an expired playable URL from the edit preview', async () => {
+    const actions = successfulActions();
+    render(<SoundManager initialSounds={[ownSound]} currentUser={{ id: 'user-1', role: 'member' }} actions={actions} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Launch horn' }));
+    await screen.findByLabelText('Audio waveform');
+
+    fireEvent.error(screen.getAllByLabelText('Preview Launch horn')[0]);
+
+    await waitFor(() => expect(actions.getSoundPlayableUrl).toHaveBeenCalledWith(ownSound.id));
+    expect(screen.getAllByLabelText('Preview Launch horn')).toHaveLength(2);
+    expect(screen.getAllByLabelText('Preview Launch horn')[0]).toHaveAttribute('src', 'https://signed.example/refreshed-playable');
+  });
+
   test('members see edit and delete only for sounds they uploaded', () => {
     render(<SoundManager initialSounds={[ownSound, otherSound]} currentUser={{ id: 'user-1', role: 'member' }} actions={successfulActions()} />);
 
@@ -155,6 +192,17 @@ describe('SoundManager', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete sound' }));
     await waitFor(() => expect(actions.deleteSound).toHaveBeenCalledWith('sound-own'));
     expect(screen.queryByText('Launch horn')).not.toBeInTheDocument();
+  });
+
+  test('focuses the first remaining result after deleting the sound being edited', async () => {
+    const actions = successfulActions();
+    render(<SoundManager initialSounds={[ownSound, otherSound]} currentUser={{ id: 'admin-1', role: 'admin' }} actions={actions} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Launch horn' }));
+    await screen.findByLabelText('Audio waveform');
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Launch horn' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete sound' }));
+
+    await waitFor(() => expect(screen.getByTestId('sound-row-sound-other')).toHaveFocus());
   });
 
   test('keeps delete retryable when the server action rejects', async () => {

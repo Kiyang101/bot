@@ -2,12 +2,12 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { SoundRecord } from '@/lib/sound-types';
 
 const mocks = vi.hoisted(() => ({
-  getSessionUser: vi.fn(),
+  getSoundboardSessionUser: vi.fn(),
   getSignedSoundUrl: vi.fn(),
   listSounds: vi.fn(),
 }));
 
-vi.mock('@/lib/session', () => ({ getSessionUser: mocks.getSessionUser }));
+vi.mock('@/lib/session', () => ({ getSoundboardSessionUser: mocks.getSoundboardSessionUser }));
 vi.mock('@/lib/sounds', () => ({
   getSignedSoundUrl: mocks.getSignedSoundUrl,
   listSounds: mocks.listSounds,
@@ -38,19 +38,20 @@ const sound: SoundRecord = {
 
 describe('sound management page loader', () => {
   beforeEach(() => {
-    mocks.getSessionUser.mockResolvedValue({ id: 'user-1', username: 'Kai', role: 'member' });
+    mocks.getSoundboardSessionUser.mockResolvedValue({ id: 'user-1', username: 'Kai', role: 'member' });
     mocks.listSounds.mockResolvedValue([sound]);
     mocks.getSignedSoundUrl.mockImplementation(async (path: string) => `https://signed.example/${path}`);
   });
 
-  test('loads the global list without guild filtering and signs playable and source previews', async () => {
+  test('loads the global list with the shared role policy without eagerly exposing source URLs', async () => {
     const { loadManagementPageData } = await import('./loader');
 
     const data = await loadManagementPageData();
 
     expect(mocks.listSounds).toHaveBeenCalledWith();
     expect(mocks.getSignedSoundUrl).toHaveBeenCalledWith(sound.storagePath);
-    expect(mocks.getSignedSoundUrl).toHaveBeenCalledWith(sound.sourceStoragePath);
+    expect(mocks.getSoundboardSessionUser).toHaveBeenCalledOnce();
+    expect(mocks.getSignedSoundUrl).not.toHaveBeenCalledWith(sound.sourceStoragePath);
     expect(data.currentUser).toEqual({ id: 'user-1', role: 'member' });
     expect(data.sounds).toEqual([{
       id: 'global-sound',
@@ -72,7 +73,7 @@ describe('sound management page loader', () => {
       createdAt: '2026-08-20T10:00:00.000Z',
       updatedAt: '2026-08-20T10:00:00.000Z',
       previewUrl: `https://signed.example/${sound.storagePath}`,
-      sourcePreviewUrl: `https://signed.example/${sound.sourceStoragePath}`,
+      sourcePreviewUrl: null,
     }]);
   });
 });

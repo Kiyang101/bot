@@ -12,7 +12,7 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    include: ['dashboard/app/**/*.test.tsx'],
+    include: ['dashboard/**/*.test.{ts,tsx}'],
     setupFiles: ['./dashboard/test/setup.ts'],
     restoreMocks: true,
   },

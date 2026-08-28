@@ -1,5 +1,6 @@
+// @vitest-environment node
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { test } from 'vitest';
 import {
   createSoundboardActions,
   type SoundboardActionDependencies,
@@ -39,14 +40,24 @@ function createDependencies(overrides: Partial<SoundboardActionDependencies> = {
     getSound: async (id) => (id === ownSound.id ? ownSound : id === otherSound.id ? otherSound : null),
     getSignedSoundUrl: async () => 'https://signed.example/playable',
     uploadSource: async () => ownSound.sourceStoragePath,
-    replacePlayableClip: async () => ownSound.storagePath,
+    uploadPlayableClip: async () => ownSound.storagePath,
+    deleteStorageObject: async () => undefined,
     downloadSource: async () => new Blob(),
+    stageSoundFilesForDeletion: async () => ({
+      sourceStoragePath: ownSound.sourceStoragePath,
+      playableStoragePath: ownSound.storagePath,
+      stagedSourcePath: 'sounds/member-1/sound-own/staging/delete-stage/source',
+      stagedPlayablePath: 'sounds/member-1/sound-own/staging/delete-stage/playable',
+      sourceMimeType: ownSound.mimeType,
+    }),
     deleteSoundFiles: async () => undefined,
+    restoreSoundFiles: async () => undefined,
+    discardSoundFileStage: async () => undefined,
     insertSound: async () => ownSound,
     updateSound: async () => ownSound,
     deleteSoundRow: async () => undefined,
-    updateSoundSortOrder: async () => undefined,
-    trimSourceFile: async () => ({ buffer: Buffer.from('clip'), durationSec: 1 }),
+    updateSoundOrder: async () => undefined,
+    trimSourceFile: async () => ({ buffer: Buffer.from('clip'), durationSec: 1, sourceDurationSec: 1 }),
     sendSoundboardPlay: async () => undefined,
     sendSoundboardStop: async () => undefined,
     revalidatePath: () => undefined,
@@ -160,13 +171,13 @@ test('upload rejects unsupported source bytes forged with an allowed MIME label 
     createDependencies({
       trimSourceFile: async () => {
         trimmed = true;
-        return { buffer: Buffer.from('clip'), durationSec: 1 };
+        return { buffer: Buffer.from('clip'), durationSec: 1, sourceDurationSec: 1 };
       },
       uploadSource: async () => {
         sourceUploaded = true;
         return ownSound.sourceStoragePath;
       },
-      replacePlayableClip: async () => {
+      uploadPlayableClip: async () => {
         playableUploaded = true;
         return ownSound.storagePath;
       },
@@ -186,7 +197,6 @@ test('upload rejects unsupported source bytes forged with an allowed MIME label 
       size: 4,
       arrayBuffer: async () => new Uint8Array([0x66, 0x4c, 0x61, 0x43]).buffer,
     },
-    sourceDurationMs: 1_000,
     trimStartMs: 0,
     trimEndMs: 500,
   });
@@ -211,13 +221,13 @@ test('upload rejects ID3-prefixed unsupported data before processing or storage'
     createDependencies({
       trimSourceFile: async () => {
         trimmed = true;
-        return { buffer: Buffer.from('clip'), durationSec: 1 };
+        return { buffer: Buffer.from('clip'), durationSec: 1, sourceDurationSec: 1 };
       },
       uploadSource: async () => {
         sourceUploaded = true;
         return ownSound.sourceStoragePath;
       },
-      replacePlayableClip: async () => {
+      uploadPlayableClip: async () => {
         playableUploaded = true;
         return ownSound.storagePath;
       },
@@ -237,7 +247,6 @@ test('upload rejects ID3-prefixed unsupported data before processing or storage'
       size: id3Only.byteLength,
       arrayBuffer: async () => id3Only.buffer,
     },
-    sourceDurationMs: 1_000,
     trimStartMs: 0,
     trimEndMs: 500,
   });
@@ -258,13 +267,13 @@ test('upload rejects a single complete zero-filled MPEG frame before processing 
     createDependencies({
       trimSourceFile: async () => {
         trimmed = true;
-        return { buffer: Buffer.from('clip'), durationSec: 1 };
+        return { buffer: Buffer.from('clip'), durationSec: 1, sourceDurationSec: 1 };
       },
       uploadSource: async () => {
         sourceUploaded = true;
         return ownSound.sourceStoragePath;
       },
-      replacePlayableClip: async () => {
+      uploadPlayableClip: async () => {
         playableUploaded = true;
         return ownSound.storagePath;
       },
@@ -284,7 +293,6 @@ test('upload rejects a single complete zero-filled MPEG frame before processing 
       size: forgedFrame.byteLength,
       arrayBuffer: async () => forgedFrame.buffer,
     },
-    sourceDurationMs: 1_000,
     trimStartMs: 0,
     trimEndMs: 500,
   });
@@ -305,9 +313,9 @@ test('trim rejects a truncated MPEG frame before processing or playable storage'
       downloadSource: async () => new Blob([truncatedFrame], { type: 'audio/mpeg' }),
       trimSourceFile: async () => {
         trimmed = true;
-        return { buffer: Buffer.from('clip'), durationSec: 1 };
+        return { buffer: Buffer.from('clip'), durationSec: 1, sourceDurationSec: 1 };
       },
-      replacePlayableClip: async () => {
+      uploadPlayableClip: async () => {
         playableUploaded = true;
         return ownSound.storagePath;
       },
@@ -335,9 +343,9 @@ test('trim rejects a single complete zero-filled MPEG frame before processing or
       downloadSource: async () => new Blob([forgedFrame], { type: 'audio/mpeg' }),
       trimSourceFile: async () => {
         trimmed = true;
-        return { buffer: Buffer.from('clip'), durationSec: 1 };
+        return { buffer: Buffer.from('clip'), durationSec: 1, sourceDurationSec: 1 };
       },
-      replacePlayableClip: async () => {
+      uploadPlayableClip: async () => {
         playableUploaded = true;
         return ownSound.storagePath;
       },
@@ -374,4 +382,195 @@ test('a busy control response becomes a typed soundboard busy error', async () =
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('delete restores both storage objects when deleting the database row fails', async () => {
+  let filesPresent = true;
+  let restored = false;
+  const actions = createSoundboardActions(createDependencies({
+    deleteSoundFiles: async () => { filesPresent = false; },
+    deleteSoundRow: async () => { throw new Error('database unavailable'); },
+    restoreSoundFiles: async () => { filesPresent = true; restored = true; },
+  }));
+
+  const result = await actions.deleteSound(ownSound.id);
+
+  assert.deepEqual(result, { ok: false, message: 'Failed to delete sound.' });
+  assert.equal(restored, true);
+  assert.equal(filesPresent, true);
+});
+
+test('delete restores staged files and leaves the row when storage deletion fails', async () => {
+  let rowDeleted = false;
+  let restored = false;
+  const actions = createSoundboardActions(createDependencies({
+    deleteSoundFiles: async () => { throw new Error('storage unavailable'); },
+    deleteSoundRow: async () => { rowDeleted = true; },
+    restoreSoundFiles: async () => { restored = true; },
+  }));
+
+  const result = await actions.deleteSound(ownSound.id);
+
+  assert.deepEqual(result, { ok: false, message: 'Failed to delete sound.' });
+  assert.equal(restored, true);
+  assert.equal(rowDeleted, false);
+});
+
+test('trim uploads a versioned clip and removes only that staged version when the row update fails', async () => {
+  const removedPaths: string[] = [];
+  let uploadedPath = '';
+  const actions = createSoundboardActions(createDependencies({
+    downloadSource: async () => new Blob([new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+    ])]),
+    uploadPlayableClip: async () => {
+      uploadedPath = 'sounds/member-1/sound-own/playable-version-2';
+      return uploadedPath;
+    },
+    updateSound: async () => { throw new Error('database unavailable'); },
+    deleteStorageObject: async (path) => { removedPaths.push(path); },
+    trimSourceFile: async () => ({ buffer: Buffer.from('new clip'), durationSec: 0.4, sourceDurationSec: 1 }),
+  }));
+
+  const result = await actions.trimSound({ soundId: ownSound.id, trimStartMs: 100, trimEndMs: 500 });
+
+  assert.deepEqual(result, { ok: false, message: 'Failed to trim sound.' });
+  assert.deepEqual(removedPaths, [uploadedPath]);
+  assert.notEqual(uploadedPath, ownSound.storagePath);
+});
+
+test('upload persists server-measured playable duration instead of the browser duration', async () => {
+  let insertedDurationSec: number | null = null;
+  const wavHeader = new Uint8Array([
+    0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+  ]);
+  const actions = createSoundboardActions(createDependencies({
+    insertSound: async (input) => {
+      insertedDurationSec = input.durationSec;
+      return { ...ownSound, ...input };
+    },
+    trimSourceFile: async () => ({ buffer: Buffer.from('clip'), durationSec: 0.42, sourceDurationSec: 0.75 }),
+  }));
+
+  const result = await actions.uploadSound({
+    name: 'Measured', category: 'Reactions', color: '#5865f2', shortcut: null,
+    gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
+    file: { type: 'audio/wav', size: wavHeader.byteLength, arrayBuffer: async () => wavHeader.buffer },
+    trimStartMs: 0,
+    trimEndMs: 500,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(insertedDurationSec, 0.42);
+});
+
+test('trim persists measured playable duration with the new immutable storage path', async () => {
+  let update: Parameters<SoundboardActionDependencies['updateSound']>[1] | null = null;
+  const newPath = 'sounds/member-1/sound-own/playable-version-2';
+  const actions = createSoundboardActions(createDependencies({
+    downloadSource: async () => new Blob([new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+    ])]),
+    uploadPlayableClip: async () => newPath,
+    trimSourceFile: async () => ({ buffer: Buffer.from('clip'), durationSec: 0.41, sourceDurationSec: 1 }),
+    updateSound: async (_id, input) => {
+      update = input;
+      return { ...ownSound, ...input };
+    },
+  }));
+
+  const result = await actions.trimSound({ soundId: ownSound.id, trimStartMs: 100, trimEndMs: 500 });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(update, {
+    storagePath: newPath,
+    trimStartMs: 100,
+    trimEndMs: 500,
+    durationSec: 0.41,
+  });
+});
+
+test('duplicate shortcuts are rejected before mutation and identify the conflicting sound', async () => {
+  let updated = false;
+  const conflict = { ...otherSound, name: 'Airhorn', shortcut: 'k' };
+  const actions = createSoundboardActions(createDependencies({
+    listSounds: async () => [ownSound, conflict],
+    updateSound: async () => { updated = true; return ownSound; },
+  }));
+
+  const result = await actions.updateSound(ownSound.id, {
+    name: ownSound.name, category: ownSound.category, color: ownSound.color, shortcut: 'K',
+    gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
+  });
+
+  assert.deepEqual(result, { ok: false, message: 'Shortcut K is already assigned to Airhorn.' });
+  assert.equal(updated, false);
+});
+
+test('a shortcut uniqueness race is sanitized and identifies the newly conflicting sound', async () => {
+  const conflict = { ...otherSound, name: 'Airhorn', shortcut: 'k' };
+  let listCalls = 0;
+  const actions = createSoundboardActions(createDependencies({
+    listSounds: async () => (++listCalls === 1 ? [ownSound] : [ownSound, conflict]),
+    updateSound: async () => { throw new Error('duplicate key value violates unique constraint "Sound_shortcut_key"'); },
+  }));
+
+  const result = await actions.updateSound(ownSound.id, {
+    name: ownSound.name, category: ownSound.category, color: ownSound.color, shortcut: 'k',
+    gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
+  });
+
+  assert.deepEqual(result, { ok: false, message: 'Shortcut K is already assigned to Airhorn.' });
+});
+
+test('unexpected mutation failures return a stable message without internal details', async () => {
+  const actions = createSoundboardActions(createDependencies({
+    updateSound: async () => { throw new Error('postgres://secret@database: password leaked'); },
+  }));
+
+  const result = await actions.updateSound(ownSound.id, {
+    name: ownSound.name, category: ownSound.category, color: ownSound.color, shortcut: null,
+    gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
+  });
+
+  assert.deepEqual(result, { ok: false, message: 'Failed to update sound.' });
+});
+
+test('source URLs require owner-or-admin authorization while playable URLs require authentication', async () => {
+  let signed = 0;
+  const memberActions = createSoundboardActions(createDependencies({
+    getSignedSoundUrl: async () => { signed += 1; return 'https://signed.example/refreshed'; },
+  }));
+
+  assert.deepEqual(
+    await memberActions.getSoundSourceUrl(otherSound.id),
+    { ok: false, message: 'You can only modify your own sounds.' },
+  );
+  assert.deepEqual(
+    await memberActions.getSoundPlayableUrl(otherSound.id),
+    { ok: true, value: 'https://signed.example/refreshed' },
+  );
+  assert.equal(signed, 1);
+
+  const adminActions = createSoundboardActions(createDependencies({
+    getSessionUser: async () => ({ id: 'admin-1', username: 'Admin', avatar: null, role: 'admin' }),
+    getSignedSoundUrl: async () => 'https://signed.example/source',
+  }));
+  assert.deepEqual(
+    await adminActions.getSoundSourceUrl(otherSound.id),
+    { ok: true, value: 'https://signed.example/source' },
+  );
+});
+
+test('reorder delegates the verified complete order to one atomic persistence call', async () => {
+  const orders: string[][] = [];
+  const actions = createSoundboardActions(createDependencies({
+    getSessionUser: async () => ({ id: 'admin-1', username: 'Admin', avatar: null, role: 'admin' }),
+    updateSoundOrder: async (ids) => { orders.push(ids); },
+  }));
+
+  const result = await actions.reorderSounds([otherSound.id, ownSound.id]);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(orders, [[otherSound.id, ownSound.id]]);
 });

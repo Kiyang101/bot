@@ -7,14 +7,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-if (!globalThis.PointerEvent) {
+if (!globalThis.PointerEvent && typeof MouseEvent !== 'undefined') {
   globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
 }
 
-if (!URL.createObjectURL) {
+if (typeof URL !== 'undefined' && !URL.createObjectURL) {
   URL.createObjectURL = vi.fn(() => 'blob:test-audio');
 }
 
-if (!URL.revokeObjectURL) {
+if (typeof URL !== 'undefined' && !URL.revokeObjectURL) {
   URL.revokeObjectURL = vi.fn();
 }

@@ -1,4 +1,12 @@
-import { deleteSound, reorderSounds, trimSound, updateSound, uploadSound } from '../actions';
+import {
+  deleteSound,
+  getSoundPlayableUrl,
+  getSoundSourceUrl,
+  reorderSounds,
+  trimSound,
+  updateSound,
+  uploadSound,
+} from '../actions';
 import SoundManager from './SoundManager';
 import { loadManagementPageData } from './loader';
 
@@ -13,7 +21,15 @@ export default async function SoundManagementPage() {
       <SoundManager
         initialSounds={data.sounds}
         currentUser={data.currentUser}
-        actions={{ deleteSound, reorderSounds, trimSound, updateSound, uploadSound }}
+        actions={{
+          deleteSound,
+          getSoundPlayableUrl,
+          getSoundSourceUrl,
+          reorderSounds,
+          trimSound,
+          updateSound,
+          uploadSound,
+        }}
       />
     </main>
   );

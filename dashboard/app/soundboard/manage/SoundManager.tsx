@@ -31,7 +31,7 @@ const COLOR_OPTIONS = ['#5865f2', '#3ba55c', '#faa61a', '#eb459e', '#ed4245'];
 
 export type ManagedSound = SoundboardSound & {
   previewUrl: string;
-  sourcePreviewUrl: string;
+  sourcePreviewUrl: string | null;
 };
 
 export interface SoundManagerActions {
@@ -40,6 +40,8 @@ export interface SoundManagerActions {
   trimSound: (input: TrimSoundInput) => Promise<SoundboardActionResult<SoundboardSound>>;
   deleteSound: (soundId: string) => Promise<SoundboardActionResult>;
   reorderSounds: (soundIds: string[]) => Promise<SoundboardActionResult>;
+  getSoundPlayableUrl: (soundId: string) => Promise<SoundboardActionResult<string>>;
+  getSoundSourceUrl: (soundId: string) => Promise<SoundboardActionResult<string>>;
 }
 
 interface SoundManagerProps {
@@ -232,7 +234,6 @@ function MetadataFields({
 export default function SoundManager({ initialSounds, currentUser, actions }: SoundManagerProps) {
   const [sounds, setSounds] = useState(initialSounds);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [selectedFileUrl, setSelectedFileUrl] = useState<string | null>(null);
   const [uploadMetadata, setUploadMetadata] = useState<EditorMetadata>({
     name: '', category: DEFAULT_CATEGORIES[0], color: COLOR_OPTIONS[0], shortcut: '', gainDb: 0, fadeInMs: 0, fadeOutMs: 0,
   });
@@ -240,18 +241,23 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editMetadata, setEditMetadata] = useState<EditorMetadata | null>(null);
   const [editRange, setEditRange] = useState<TrimRange | null>(null);
+  const [editingSourceUrl, setEditingSourceUrl] = useState<string | null>(null);
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [pendingActions, setPendingActions] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
   const [dragActive, setDragActive] = useState(false);
   const [previewingId, setPreviewingId] = useState<string | null>(null);
+  const [focusAfterDeleteId, setFocusAfterDeleteId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const localUrlsRef = useRef(new Set<string>());
+  const rowRefs = useRef(new Map<string, HTMLElement>());
+  const refreshingPreviewIdsRef = useRef(new Set<string>());
 
-  useEffect(() => () => {
-    localUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-  }, []);
+  useEffect(() => {
+    if (!focusAfterDeleteId) return;
+    rowRefs.current.get(focusAfterDeleteId)?.focus();
+    setFocusAfterDeleteId(null);
+  }, [focusAfterDeleteId, sounds]);
 
   const categories = useMemo(() => Array.from(new Set([
     ...DEFAULT_CATEGORIES,
@@ -289,26 +295,43 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
     }
   }
 
+  async function refreshPlayableUrl(soundId: string, expiredUrl: string) {
+    if (refreshingPreviewIdsRef.current.has(soundId)) return;
+    refreshingPreviewIdsRef.current.add(soundId);
+    try {
+      const result = await actions.getSoundPlayableUrl(soundId);
+      if (!result.ok) {
+        setError(result.message);
+        return;
+      }
+      const previewUrl = resultValue(result);
+      if (!previewUrl || previewUrl === expiredUrl) {
+        setError('Could not refresh the sound preview. Try again.');
+        return;
+      }
+      setSounds((current) => current.map((sound) => sound.id === soundId ? { ...sound, previewUrl } : sound));
+    } catch {
+      setError('Could not refresh the sound preview. Try again.');
+    } finally {
+      refreshingPreviewIdsRef.current.delete(soundId);
+    }
+  }
+
   function chooseFile(file: File | null) {
     setError(null);
     setUploadRange(null);
     if (!file) {
       setSelectedFile(null);
-      setSelectedFileUrl(null);
       return;
     }
     const derivedName = file.name.replace(/\.[^.]+$/, '').trim() || file.name;
     const validation = validateUploadMeta(derivedName, file.type, file.size);
     if (!validation.ok) {
       setSelectedFile(null);
-      setSelectedFileUrl(null);
       setError(validation.message);
       return;
     }
-    const localUrl = URL.createObjectURL(file);
-    localUrlsRef.current.add(localUrl);
     setSelectedFile(file);
-    setSelectedFileUrl(localUrl);
     setUploadMetadata((current) => ({ ...current, name: validation.value.name }));
   }
 
@@ -324,7 +347,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
 
   async function handleUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedFile || !uploadRange || !selectedFileUrl) {
+    if (!selectedFile || !uploadRange) {
       setError('Choose an audio file and wait for its waveform before uploading.');
       return;
     }
@@ -332,7 +355,6 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       actions.uploadSound({
         ...metadataInput(uploadMetadata),
         file: selectedFile,
-        sourceDurationMs: uploadRange.durationMs,
         trimStartMs: Math.round(uploadRange.startMs),
         trimEndMs: Math.round(uploadRange.endMs),
       })
@@ -344,30 +366,48 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
     }
     const uploaded = resultValue(result);
     if (uploaded) {
+      const previewResult = await actions.getSoundPlayableUrl(uploaded.id);
+      if (!previewResult.ok) {
+        setError(previewResult.message);
+        return;
+      }
+      const previewUrl = resultValue(previewResult);
+      if (!previewUrl) return;
       setSounds((current) => [...current, {
         ...uploaded,
-        previewUrl: selectedFileUrl,
-        sourcePreviewUrl: selectedFileUrl,
+        previewUrl,
+        sourcePreviewUrl: null,
       }]);
     }
     setAnnouncement(`${uploadMetadata.name} uploaded.`);
     setSelectedFile(null);
-    setSelectedFileUrl(null);
     setUploadRange(null);
     setUploadMetadata((current) => ({ ...current, name: '', shortcut: '' }));
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
-  function beginEditing(sound: ManagedSound) {
+  async function beginEditing(sound: ManagedSound) {
     setError(null);
     setConfirmingDeleteId(null);
     setEditingId(sound.id);
+    setEditingSourceUrl(null);
     setEditMetadata(metadataForSound(sound));
     setEditRange({
       startMs: sound.trimStartMs,
       endMs: sound.trimEndMs,
       durationMs: Math.round((sound.durationSec ?? sound.trimEndMs / 1_000) * 1_000),
     });
+    const sourceResult = await runAction(
+      `source:${sound.id}`,
+      'Could not load the source audio. Try again.',
+      () => actions.getSoundSourceUrl(sound.id),
+    );
+    if (!sourceResult) return;
+    if (!sourceResult.ok) {
+      setError(sourceResult.message);
+      return;
+    }
+    setEditingSourceUrl(resultValue(sourceResult));
   }
 
   async function saveMetadata(event: FormEvent<HTMLFormElement>) {
@@ -403,7 +443,14 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       return;
     }
     const updated = resultValue(result);
-    if (updated) setSounds((current) => current.map((sound) => sound.id === updated.id ? mergeSound(sound, updated) : sound));
+    if (updated) {
+      const previewResult = await actions.getSoundPlayableUrl(updated.id);
+      const previewUrl = resultValue(previewResult);
+      setSounds((current) => current.map((sound) => sound.id === updated.id
+        ? { ...mergeSound(sound, updated), previewUrl: previewUrl ?? sound.previewUrl }
+        : sound));
+      if (!previewResult.ok) setError(previewResult.message);
+    }
     setAnnouncement(`${editingSound.name} trim saved.`);
   }
 
@@ -417,12 +464,15 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       setError(result.message);
       return;
     }
-    setSounds((current) => current.filter((candidate) => candidate.id !== sound.id));
+    const remaining = sounds.filter((candidate) => candidate.id !== sound.id);
+    setSounds(remaining);
     setConfirmingDeleteId(null);
     if (editingId === sound.id) {
       setEditingId(null);
       setEditMetadata(null);
       setEditRange(null);
+      setEditingSourceUrl(null);
+      setFocusAfterDeleteId(remaining[0]?.id ?? null);
     }
     setAnnouncement(`${sound.name} deleted.`);
   }
@@ -533,17 +583,23 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
               </button>
             </form>
             <div className="sound-waveform-column">
-              <WaveformEditor
-                source={editingSound.sourcePreviewUrl}
+              {editingSourceUrl ? <WaveformEditor
+                source={editingSourceUrl}
                 initialStartMs={editingSound.trimStartMs}
                 initialEndMs={editingSound.trimEndMs}
                 disabled={isPending(`trim:${editingSound.id}`)}
                 onRangeChange={setEditRange}
-              />
-              <button type="button" onClick={() => void saveTrim()} disabled={!editRange || isPending(`trim:${editingSound.id}`)}>
+              /> : <p className="waveform-status" aria-live="polite">Loading source audio…</p>}
+              <button type="button" onClick={() => void saveTrim()} disabled={!editingSourceUrl || !editRange || isPending(`trim:${editingSound.id}`)}>
                 {isPending(`trim:${editingSound.id}`) ? 'Processing trim…' : 'Save trim'}
               </button>
-              <audio className="sound-native-preview" controls src={editingSound.previewUrl} aria-label={`Preview ${editingSound.name}`} />
+              <audio
+                className="sound-native-preview"
+                controls
+                src={editingSound.previewUrl}
+                aria-label={`Preview ${editingSound.name}`}
+                onError={() => void refreshPlayableUrl(editingSound.id, editingSound.previewUrl)}
+              />
             </div>
           </div>
         </section>
@@ -572,6 +628,11 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
                 <article
                   className={`sound-library-row${previewingId === sound.id ? ' preview-active' : ''}`}
                   data-testid={`sound-row-${sound.id}`}
+                  tabIndex={-1}
+                  ref={(element) => {
+                    if (element) rowRefs.current.set(sound.id, element);
+                    else rowRefs.current.delete(sound.id);
+                  }}
                   key={sound.id}
                   style={{ '--sound-color': sound.color } as React.CSSProperties}
                   aria-busy={deleting}
@@ -598,6 +659,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
                     onPlay={() => setPreviewingId(sound.id)}
                     onPause={() => setPreviewingId((current) => current === sound.id ? null : current)}
                     onEnded={() => setPreviewingId((current) => current === sound.id ? null : current)}
+                    onError={() => void refreshPlayableUrl(sound.id, sound.previewUrl)}
                   />
                   <div className="sound-row-actions">
                     {isAdmin && (
@@ -608,7 +670,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
                     )}
                     {manageable && (
                       <>
-                        <button type="button" className="secondary" aria-label={`Edit ${sound.name}`} onClick={() => beginEditing(sound)}>Edit</button>
+                        <button type="button" className="secondary" aria-label={`Edit ${sound.name}`} onClick={() => void beginEditing(sound)}>Edit</button>
                         <button type="button" className="secondary danger-outline" aria-label={`Delete ${sound.name}`} onClick={() => { setError(null); setConfirmingDeleteId(sound.id); }}>Delete</button>
                       </>
                     )}

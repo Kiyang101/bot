@@ -10,8 +10,8 @@ import {
   validateUploadMeta,
 } from '../../lib/sound-validation';
 import type { SoundMutationResult, SoundRecord } from '../../lib/sound-types';
-import type { NewSoundRecord, SoundRecordUpdate } from '../../lib/sounds';
-import type { SoundboardPlayPayload } from '../../lib/control';
+import type { NewSoundRecord, SoundFileDeletionStage, SoundRecordUpdate } from '../../lib/sounds';
+import { SoundboardBusyError, type SoundboardPlayPayload } from '../../lib/control';
 import { detectSupportedAudioMimeType } from '../../lib/audio';
 
 export type SoundboardSound = Omit<SoundRecord, 'storagePath' | 'sourceStoragePath'>;
@@ -39,7 +39,6 @@ type ValidSoundMetadata = Required<
 
 export interface UploadSoundInput extends SoundMetadataInput {
   file: Pick<File, 'arrayBuffer' | 'size' | 'type'>;
-  sourceDurationMs: number;
   trimStartMs: number;
   trimEndMs: number;
 }
@@ -62,19 +61,26 @@ export interface SoundboardActionDependencies {
   getSound: (id: string) => Promise<SoundRecord | null>;
   getSignedSoundUrl: (path: string) => Promise<string>;
   uploadSource: (input: { uploadedById: string; soundId: string; file: ArrayBuffer; mimeType: string }) => Promise<string>;
-  replacePlayableClip: (input: { uploadedById: string; soundId: string; file: Uint8Array; mimeType?: string }) => Promise<string>;
+  uploadPlayableClip: (input: { uploadedById: string; soundId: string; file: Uint8Array; mimeType?: string; versionId: string }) => Promise<string>;
+  deleteStorageObject: (path: string) => Promise<void>;
   downloadSource: (input: { uploadedById: string; soundId: string }) => Promise<Blob>;
-  deleteSoundFiles: (input: { uploadedById: string; soundId: string }) => Promise<void>;
+  stageSoundFilesForDeletion: (input: {
+    sound: Pick<SoundRecord, 'id' | 'uploadedById' | 'sourceStoragePath' | 'storagePath' | 'mimeType'>;
+    stageId: string;
+  }) => Promise<SoundFileDeletionStage>;
+  deleteSoundFiles: (stage: SoundFileDeletionStage) => Promise<void>;
+  restoreSoundFiles: (stage: SoundFileDeletionStage) => Promise<void>;
+  discardSoundFileStage: (stage: SoundFileDeletionStage) => Promise<void>;
   insertSound: (input: NewSoundRecord) => Promise<SoundRecord>;
   updateSound: (id: string, input: SoundRecordUpdate) => Promise<SoundRecord>;
   deleteSoundRow: (id: string) => Promise<void>;
-  updateSoundSortOrder: (id: string, sortOrder: number) => Promise<void>;
+  updateSoundOrder: (soundIds: string[]) => Promise<void>;
   trimSourceFile: (input: {
     source: Buffer | Uint8Array;
     mimeType: string;
     trimStartMs: number;
     trimEndMs: number;
-  }) => Promise<{ buffer: Buffer; durationSec: number }>;
+  }) => Promise<{ buffer: Buffer; durationSec: number; sourceDurationSec: number }>;
   sendSoundboardPlay: (payload: SoundboardPlayPayload) => Promise<void>;
   sendSoundboardStop: (guildId: string, channelId: string) => Promise<void>;
   revalidatePath: (path: string) => void;
@@ -86,8 +92,21 @@ function asClientSound(sound: SoundRecord): SoundboardSound {
   return clientSound;
 }
 
+const PUBLIC_PROCESSING_MESSAGES = new Set([
+  'Audio processing is unavailable on this dashboard host.',
+  'The uploaded audio file could not be processed.',
+  'Sound must be an MP3, WAV, or OGG file.',
+  'Trim values must be finite numbers.',
+  'Trim range must fit inside the source duration.',
+  'Sound clips must be at least 100 ms long.',
+]);
+
 function actionError(error: unknown, fallback: string): SoundMutationResult {
-  return { ok: false, message: error instanceof Error ? error.message : fallback };
+  if (error instanceof SoundboardBusyError) return { ok: false, message: error.message };
+  if (error instanceof Error && PUBLIC_PROCESSING_MESSAGES.has(error.message)) {
+    return { ok: false, message: error.message };
+  }
+  return { ok: false, message: fallback };
 }
 
 async function requireUser(dependencies: SoundboardActionDependencies): Promise<SessionUser | null> {
@@ -95,8 +114,12 @@ async function requireUser(dependencies: SoundboardActionDependencies): Promise<
 }
 
 function revalidateSoundboard(dependencies: SoundboardActionDependencies): void {
-  dependencies.revalidatePath('/soundboard');
-  dependencies.revalidatePath('/soundboard/manage');
+  try {
+    dependencies.revalidatePath('/soundboard');
+    dependencies.revalidatePath('/soundboard/manage');
+  } catch {
+    // The mutation already committed; cache invalidation must not turn it into a reported failure.
+  }
 }
 
 function validChannelId(channelId: unknown): string | null {
@@ -154,6 +177,55 @@ function validateMetadata(input: Partial<SoundMetadataInput> | null | undefined)
 
 function authorizeSoundMutation(user: SessionUser, sound: SoundRecord): SoundMutationResult | null {
   return canEditSound(user, sound) ? null : { ok: false, message: 'You can only modify your own sounds.' };
+}
+
+function shortcutConflictMessage(shortcut: string, soundName: string): string {
+  const label = shortcut === 'space' ? 'Space' : shortcut.toUpperCase();
+  return `Shortcut ${label} is already assigned to ${soundName}.`;
+}
+
+async function findShortcutConflict(
+  dependencies: SoundboardActionDependencies,
+  shortcut: string | null,
+  excludedSoundId?: string,
+): Promise<SoundRecord | null> {
+  if (!shortcut) return null;
+  const sounds = await dependencies.listSounds();
+  return sounds.find((sound) => sound.id !== excludedSoundId && sound.shortcut === shortcut) ?? null;
+}
+
+function isShortcutUniquenessError(error: unknown): boolean {
+  return error instanceof Error
+    && /(?:Sound_shortcut_key|duplicate key value.*shortcut)/i.test(error.message);
+}
+
+async function shortcutRaceResult(
+  dependencies: SoundboardActionDependencies,
+  error: unknown,
+  shortcut: string | null,
+  excludedSoundId?: string,
+): Promise<SoundMutationResult | null> {
+  if (!shortcut || !isShortcutUniquenessError(error)) return null;
+  try {
+    const conflict = await findShortcutConflict(dependencies, shortcut, excludedSoundId);
+    if (conflict) return { ok: false, message: shortcutConflictMessage(shortcut, conflict.name) };
+  } catch {
+    // Keep uniqueness races stable even when the follow-up lookup is unavailable.
+  }
+  const label = shortcut === 'space' ? 'Space' : shortcut.toUpperCase();
+  return { ok: false, message: `Shortcut ${label} is already assigned to another sound.` };
+}
+
+function normalizeTrimRequest(input: { trimStartMs: number; trimEndMs: number }): SoundMutationResult<{
+  trimStartMs: number;
+  trimEndMs: number;
+}> {
+  if (![input.trimStartMs, input.trimEndMs].every(Number.isFinite)) {
+    return { ok: false, message: 'Trim values must be finite numbers.' };
+  }
+  const trimStartMs = Math.round(input.trimStartMs);
+  const trimEndMs = Math.round(input.trimEndMs);
+  return validateTrimRange({ trimStartMs, trimEndMs, sourceDurationMs: trimEndMs });
 }
 
 export function createSoundboardActions(dependencies: SoundboardActionDependencies) {
@@ -226,18 +298,20 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       if (!file || typeof file.arrayBuffer !== 'function') return { ok: false, message: 'Choose an audio file to upload.' };
       const uploadMeta = validateUploadMeta(metadata.value.name, file.type, file.size);
       if (!uploadMeta.ok) return uploadMeta;
-      if (!Number.isFinite(input.sourceDurationMs) || input.sourceDurationMs <= 0) {
-        return { ok: false, message: 'Source duration is required.' };
-      }
-      const trim = validateTrimRange({
-        trimStartMs: input.trimStartMs,
-        trimEndMs: input.trimEndMs,
-        sourceDurationMs: input.sourceDurationMs,
-      });
+      const trim = normalizeTrimRequest(input);
       if (!trim.ok) return trim;
 
+      try {
+        const conflict = await findShortcutConflict(dependencies, metadata.value.shortcut);
+        if (conflict) {
+          return { ok: false, message: shortcutConflictMessage(metadata.value.shortcut!, conflict.name) };
+        }
+      } catch {
+        return { ok: false, message: 'Failed to check the requested shortcut.' };
+      }
+
       const soundId = dependencies.createSoundId();
-      let sourceUploaded = false;
+      const uploadedPaths: string[] = [];
       try {
         const source = await file.arrayBuffer();
         const actualMeta = validateUploadMeta(metadata.value.name, file.type, source.byteLength);
@@ -258,13 +332,15 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           file: source,
           mimeType: sourceMimeType,
         });
-        sourceUploaded = true;
-        const storagePath = await dependencies.replacePlayableClip({
+        uploadedPaths.push(sourceStoragePath);
+        const storagePath = await dependencies.uploadPlayableClip({
           uploadedById: user.id,
           soundId,
           file: clip.buffer,
           mimeType: 'audio/wav',
+          versionId: dependencies.createSoundId(),
         });
+        uploadedPaths.push(storagePath);
         const sound = await dependencies.insertSound({
           id: soundId,
           ...metadata.value,
@@ -272,7 +348,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           sourceStoragePath,
           mimeType: sourceMimeType,
           sizeBytes: source.byteLength,
-          durationSec: input.sourceDurationMs / 1_000,
+          durationSec: clip.durationSec,
           uploadedById: user.id,
           uploadedByName: user.username,
           trimStartMs: trim.value.trimStartMs,
@@ -282,13 +358,11 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         revalidateSoundboard(dependencies);
         return { ok: true, value: asClientSound(sound) };
       } catch (error) {
-        if (sourceUploaded) {
-          try {
-            await dependencies.deleteSoundFiles({ uploadedById: user.id, soundId });
-          } catch {
-            // Preserve the primary failure; storage cleanup is best-effort after a failed insert.
-          }
+        for (const path of uploadedPaths.reverse()) {
+          await dependencies.deleteStorageObject(path).catch(() => undefined);
         }
+        const race = await shortcutRaceResult(dependencies, error, metadata.value.shortcut);
+        if (race) return race;
         return actionError(error, 'Failed to upload sound.');
       }
     },
@@ -307,10 +381,14 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         if (!sound) return { ok: false, message: 'Sound not found.' };
         const authorization = authorizeSoundMutation(user, sound);
         if (authorization) return authorization;
+        const conflict = await findShortcutConflict(dependencies, metadata.value.shortcut, sound.id);
+        if (conflict) return { ok: false, message: shortcutConflictMessage(metadata.value.shortcut!, conflict.name) };
         const updated = await dependencies.updateSound(id, metadata.value);
         revalidateSoundboard(dependencies);
         return { ok: true, value: asClientSound(updated) };
       } catch (error) {
+        const race = await shortcutRaceResult(dependencies, error, metadata.ok ? metadata.value.shortcut : null, id);
+        if (race) return race;
         return actionError(error, 'Failed to update sound.');
       }
     },
@@ -321,19 +399,15 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       if (!input || typeof input !== 'object') return { ok: false, message: 'Trim details are required.' };
       const soundId = validSoundId(input?.soundId);
       if (!soundId) return { ok: false, message: 'Sound id is required.' };
+      const trim = normalizeTrimRequest(input);
+      if (!trim.ok) return trim;
 
+      let stagedPlayablePath: string | null = null;
       try {
         const sound = await dependencies.getSound(soundId);
         if (!sound) return { ok: false, message: 'Sound not found.' };
         const authorization = authorizeSoundMutation(user, sound);
         if (authorization) return authorization;
-        const sourceDurationMs = (sound.durationSec ?? 0) * 1_000;
-        const trim = validateTrimRange({
-          trimStartMs: input.trimStartMs,
-          trimEndMs: input.trimEndMs,
-          sourceDurationMs,
-        });
-        if (!trim.ok) return trim;
         const source = await dependencies.downloadSource({ uploadedById: sound.uploadedById, soundId: sound.id });
         const sourceBytes = new Uint8Array(await source.arrayBuffer());
         const sourceMimeType = detectSupportedAudioMimeType(sourceBytes);
@@ -344,17 +418,55 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           trimStartMs: trim.value.trimStartMs,
           trimEndMs: trim.value.trimEndMs,
         });
-        await dependencies.replacePlayableClip({
+        stagedPlayablePath = await dependencies.uploadPlayableClip({
           uploadedById: sound.uploadedById,
           soundId: sound.id,
           file: clip.buffer,
           mimeType: 'audio/wav',
+          versionId: dependencies.createSoundId(),
         });
-        const updated = await dependencies.updateSound(sound.id, trim.value);
+        const updated = await dependencies.updateSound(sound.id, {
+          storagePath: stagedPlayablePath,
+          ...trim.value,
+          durationSec: clip.durationSec,
+        });
+        stagedPlayablePath = null;
+        await dependencies.deleteStorageObject(sound.storagePath).catch(() => undefined);
         revalidateSoundboard(dependencies);
         return { ok: true, value: asClientSound(updated) };
       } catch (error) {
+        if (stagedPlayablePath) await dependencies.deleteStorageObject(stagedPlayablePath).catch(() => undefined);
         return actionError(error, 'Failed to trim sound.');
+      }
+    },
+
+    async getSoundPlayableUrl(soundId: string): Promise<SoundboardActionResult<string>> {
+      const user = await requireUser(dependencies);
+      if (!user) return { ok: false, message: 'Not authenticated.' };
+      const id = validSoundId(soundId);
+      if (!id) return { ok: false, message: 'Sound id is required.' };
+      try {
+        const sound = await dependencies.getSound(id);
+        if (!sound) return { ok: false, message: 'Sound not found.' };
+        return { ok: true, value: await dependencies.getSignedSoundUrl(sound.storagePath) };
+      } catch (error) {
+        return actionError(error, 'Failed to refresh the sound preview.');
+      }
+    },
+
+    async getSoundSourceUrl(soundId: string): Promise<SoundboardActionResult<string>> {
+      const user = await requireUser(dependencies);
+      if (!user) return { ok: false, message: 'Not authenticated.' };
+      const id = validSoundId(soundId);
+      if (!id) return { ok: false, message: 'Sound id is required.' };
+      try {
+        const sound = await dependencies.getSound(id);
+        if (!sound) return { ok: false, message: 'Sound not found.' };
+        const authorization = authorizeSoundMutation(user, sound);
+        if (authorization) return authorization;
+        return { ok: true, value: await dependencies.getSignedSoundUrl(sound.sourceStoragePath) };
+      } catch (error) {
+        return actionError(error, 'Failed to load the source audio.');
       }
     },
 
@@ -364,16 +476,27 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const id = validSoundId(soundId);
       if (!id) return { ok: false, message: 'Sound id is required.' };
 
+      let stage: SoundFileDeletionStage | null = null;
       try {
         const sound = await dependencies.getSound(id);
         if (!sound) return { ok: false, message: 'Sound not found.' };
         const authorization = authorizeSoundMutation(user, sound);
         if (authorization) return authorization;
-        await dependencies.deleteSoundFiles({ uploadedById: sound.uploadedById, soundId: sound.id });
+        stage = await dependencies.stageSoundFilesForDeletion({ sound, stageId: dependencies.createSoundId() });
+        await dependencies.deleteSoundFiles(stage);
         await dependencies.deleteSoundRow(sound.id);
+        await dependencies.discardSoundFileStage(stage).catch(() => undefined);
         revalidateSoundboard(dependencies);
         return { ok: true };
       } catch (error) {
+        if (stage) {
+          try {
+            await dependencies.restoreSoundFiles(stage);
+            await dependencies.discardSoundFileStage(stage).catch(() => undefined);
+          } catch {
+            return { ok: false, message: 'Failed to delete sound. Recovery copies were retained for an administrator.' };
+          }
+        }
         return actionError(error, 'Failed to delete sound.');
       }
     },
@@ -396,9 +519,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         ) {
           return { ok: false, message: 'Sound order must include every global sound exactly once.' };
         }
-        for (const [sortOrder, soundId] of soundIds.entries()) {
-          await dependencies.updateSoundSortOrder(soundId, sortOrder);
-        }
+        await dependencies.updateSoundOrder(soundIds);
         revalidateSoundboard(dependencies);
         return { ok: true };
       } catch (error) {
@@ -418,19 +539,23 @@ async function loadDefaultDependencies(): Promise<SoundboardActionDependencies> 
     import('next/cache'),
   ]);
   return {
-    getSessionUser: session.getSessionUser,
+    getSessionUser: session.getSoundboardSessionUser,
     getSelectedGuildId: guild.getSelectedGuildId,
     listSounds: sounds.listSounds,
     getSound: sounds.getSound,
     getSignedSoundUrl: sounds.getSignedSoundUrl,
     uploadSource: sounds.uploadSource,
-    replacePlayableClip: sounds.replacePlayableClip,
+    uploadPlayableClip: sounds.uploadPlayableClip,
+    deleteStorageObject: sounds.deleteStorageObject,
     downloadSource: sounds.downloadSource,
+    stageSoundFilesForDeletion: sounds.stageSoundFilesForDeletion,
     deleteSoundFiles: sounds.deleteSoundFiles,
+    restoreSoundFiles: sounds.restoreSoundFiles,
+    discardSoundFileStage: sounds.discardSoundFileStage,
     insertSound: sounds.insertSound,
     updateSound: sounds.updateSound,
     deleteSoundRow: sounds.deleteSoundRow,
-    updateSoundSortOrder: sounds.updateSoundSortOrder,
+    updateSoundOrder: sounds.updateSoundOrder,
     trimSourceFile: audio.trimSourceFile,
     sendSoundboardPlay: control.sendSoundboardPlay,
     sendSoundboardStop: control.sendSoundboardStop,
@@ -471,6 +596,16 @@ export async function updateSound(soundId: string, input: SoundMetadataInput): P
 export async function trimSound(input: TrimSoundInput): Promise<SoundboardActionResult<SoundboardSound>> {
   'use server';
   return (await actionsForRequest()).trimSound(input);
+}
+
+export async function getSoundPlayableUrl(soundId: string): Promise<SoundboardActionResult<string>> {
+  'use server';
+  return (await actionsForRequest()).getSoundPlayableUrl(soundId);
+}
+
+export async function getSoundSourceUrl(soundId: string): Promise<SoundboardActionResult<string>> {
+  'use server';
+  return (await actionsForRequest()).getSoundSourceUrl(soundId);
 }
 
 export async function deleteSound(soundId: string): Promise<SoundboardActionResult> {

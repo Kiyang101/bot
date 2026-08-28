@@ -41,3 +41,8 @@ export async function requireRole(role: Role, options: SessionOptions = {}): Pro
   if (role === 'admin' && user.role !== 'admin') throw new Error('Admins only.');
   return user;
 }
+
+/** Soundboard pages and mutations share this policy so verified remote admins retain admin capabilities. */
+export async function getSoundboardSessionUser(): Promise<SessionUser | null> {
+  return getSessionUser({ allowRemoteAdmin: true });
+}

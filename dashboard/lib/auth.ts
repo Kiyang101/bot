@@ -23,8 +23,8 @@ export interface SessionUser {
 
 /** Pages each role is allowed to open. Members are confined to Speak + Music. */
 export const ROLE_PATHS: Record<Role, string[]> = {
-  admin: ["/", "/servers", "/logs", "/speak", "/music", "/config"],
-  member: ["/servers", "/speak", "/music"],
+  admin: ["/", "/servers", "/logs", "/speak", "/music", "/soundboard", "/config"],
+  member: ["/servers", "/speak", "/music", "/soundboard"],
 };
 
 /** Where to send a user after login / when they hit a page above their role. */

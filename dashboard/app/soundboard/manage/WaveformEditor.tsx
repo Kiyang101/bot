@@ -75,6 +75,8 @@ export default function WaveformEditor({
   const trackRef = useRef<HTMLDivElement>(null);
   const activeHandleRef = useRef<ActiveHandle | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const previewBoundaryCleanupRef = useRef<(() => void) | null>(null);
+  const previewRequestRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,6 +134,9 @@ export default function WaveformEditor({
   }, [durationMs, endMs, onRangeChange, startMs]);
 
   const stopPreview = useCallback(() => {
+    previewRequestRef.current += 1;
+    previewBoundaryCleanupRef.current?.();
+    previewBoundaryCleanupRef.current = null;
     const audio = previewAudioRef.current;
     if (audio) {
       audio.pause();
@@ -140,7 +145,7 @@ export default function WaveformEditor({
     setPreviewing(false);
   }, []);
 
-  useEffect(() => stopPreview, [stopPreview]);
+  useEffect(() => stopPreview, [source, stopPreview]);
 
   const setHandlePosition = useCallback((handle: ActiveHandle, rawValueMs: number) => {
     if (handle === 'start') {
@@ -182,17 +187,39 @@ export default function WaveformEditor({
       return;
     }
     const audio = new Audio(localUrl);
-    const stopAtBoundary = () => {
-      if (audio.currentTime * 1_000 >= endMs) stopPreview();
-    };
+    const requestId = previewRequestRef.current + 1;
+    previewRequestRef.current = requestId;
     audio.currentTime = startMs / 1_000;
-    audio.addEventListener('timeupdate', stopAtBoundary);
-    audio.addEventListener('ended', stopPreview);
+    const handleEnded = () => stopPreview();
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let frameId: number | null = null;
+    previewBoundaryCleanupRef.current = () => {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+      if (frameId !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frameId);
+      audio.removeEventListener('ended', handleEnded);
+    };
+    audio.addEventListener('ended', handleEnded);
     previewAudioRef.current = audio;
     setPreviewing(true);
     try {
       await audio.play();
+      if (previewRequestRef.current !== requestId || previewAudioRef.current !== audio) return;
+      const remainingMs = Math.max(0, endMs - audio.currentTime * 1_000);
+      if (remainingMs === 0) {
+        stopPreview();
+        return;
+      }
+      timeoutId = setTimeout(stopPreview, remainingMs);
+      const checkBoundary = () => {
+        if (audio.currentTime * 1_000 >= endMs) {
+          stopPreview();
+          return;
+        }
+        if (typeof requestAnimationFrame === 'function') frameId = requestAnimationFrame(checkBoundary);
+      };
+      if (typeof requestAnimationFrame === 'function') frameId = requestAnimationFrame(checkBoundary);
     } catch {
+      if (previewRequestRef.current !== requestId) return;
       stopPreview();
       setPreviewError('Preview could not start. Check your browser audio settings.');
     }

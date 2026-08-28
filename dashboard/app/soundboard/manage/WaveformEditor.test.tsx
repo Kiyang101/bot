@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import WaveformEditor from './WaveformEditor';
 
@@ -79,7 +79,7 @@ describe('WaveformEditor', () => {
     expect(screen.getByText('1.50 s selected')).toBeInTheDocument();
   });
 
-  test('preview starts at the trim boundary and stops at the selected end', async () => {
+  test('preview starts at the trim boundary and stops on a precise cancellable timer', async () => {
     const listeners = new Map<string, EventListener>();
     const audio = {
       currentTime: 0,
@@ -91,13 +91,47 @@ describe('WaveformEditor', () => {
     vi.stubGlobal('Audio', vi.fn(() => audio));
     render(<WaveformEditor source={source} initialStartMs={400} initialEndMs={900} onRangeChange={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Preview selection' }));
+    const previewButton = await screen.findByRole('button', { name: 'Preview selection' });
+    vi.useFakeTimers();
+    fireEvent.click(previewButton);
+    await Promise.resolve();
     expect(audio.currentTime).toBe(0.4);
     expect(audio.play).toHaveBeenCalledOnce();
 
-    audio.currentTime = 0.91;
-    listeners.get('timeupdate')?.(new Event('timeupdate'));
-    await waitFor(() => expect(audio.pause).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(499);
+    expect(audio.pause).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(audio.pause).toHaveBeenCalledOnce();
+    expect(audio.removeEventListener).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  test('does not install a boundary timer after an in-flight preview is cancelled', async () => {
+    let resolvePlay!: () => void;
+    const audio = {
+      currentTime: 0,
+      pause: vi.fn(),
+      play: vi.fn(() => new Promise<void>((resolve) => { resolvePlay = resolve; })),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    vi.stubGlobal('Audio', vi.fn(() => audio));
+    const view = render(<WaveformEditor source={source} initialStartMs={400} initialEndMs={900} onRangeChange={vi.fn()} />);
+    const previewButton = await screen.findByRole('button', { name: 'Preview selection' });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(previewButton);
+      view.unmount();
+      expect(audio.pause).toHaveBeenCalledOnce();
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:waveform-source');
+
+      await act(async () => { resolvePlay(); });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(audio.pause).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test('keeps the waveform usable when browser preview cannot start', async () => {
