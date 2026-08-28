@@ -210,6 +210,38 @@ describe('SoundManager', () => {
     expect(rows.map((row) => within(row).getByRole('heading', { level: 3 }).textContent)).toEqual(['Airhorn', 'Launch horn']);
   });
 
+  test('does not resurrect a deleted sound when an earlier reorder completes out of order', async () => {
+    let resolveReorder!: (result: SoundboardActionResult) => void;
+    const updatedOtherSound = { ...otherSound, name: 'Updated Airhorn' } as SoundboardSound;
+    const actions = successfulActions({
+      reorderSounds: vi.fn(() => new Promise<SoundboardActionResult>((resolve) => { resolveReorder = resolve; })),
+      updateSound: vi.fn(async () => ({ ok: true as const, value: updatedOtherSound })),
+    });
+    render(<SoundManager initialSounds={[ownSound, otherSound, thirdSound]} currentUser={{ id: 'admin-1', role: 'admin' }} actions={actions} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move Launch horn down' }));
+    await waitFor(() => expect(actions.reorderSounds).toHaveBeenCalledWith(['sound-other', 'sound-own', 'sound-third']));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Airhorn' }));
+    await screen.findByLabelText('Audio waveform');
+    fireEvent.change(screen.getByLabelText('Sound name'), { target: { value: 'Updated Airhorn' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(actions.updateSound).toHaveBeenCalled());
+
+    const ownRow = screen.getByTestId('sound-row-sound-own');
+    fireEvent.click(within(ownRow).getByRole('button', { name: 'Delete Launch horn' }));
+    fireEvent.click(within(ownRow).getByRole('button', { name: 'Delete sound' }));
+    await waitFor(() => expect(screen.queryByTestId('sound-row-sound-own')).not.toBeInTheDocument());
+
+    resolveReorder({ ok: true });
+
+    await waitFor(() => {
+      const rows = screen.getAllByTestId(/^sound-row-/);
+      expect(rows.map((row) => within(row).getByRole('heading', { level: 3 }).textContent)).toEqual(['Updated Airhorn', 'Cheer']);
+    });
+    expect(screen.queryByTestId('sound-row-sound-own')).not.toBeInTheDocument();
+  });
+
   test('delete requires the explicit Delete sound confirmation', async () => {
     const actions = successfulActions();
     render(<SoundManager initialSounds={[ownSound]} currentUser={{ id: 'user-1', role: 'member' }} actions={actions} />);

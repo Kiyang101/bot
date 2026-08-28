@@ -121,6 +121,18 @@ function mergeSound(saved: ManagedSound, updated: SoundboardSound): ManagedSound
   return { ...saved, ...updated, previewUrl: saved.previewUrl, sourcePreviewUrl: saved.sourcePreviewUrl };
 }
 
+function applySoundOrder(current: ManagedSound[], requestedIds: string[]): ManagedSound[] {
+  const currentById = new Map(current.map((sound) => [sound.id, sound]));
+  const includedIds = new Set<string>();
+  const orderedCurrent = requestedIds.flatMap((soundId) => {
+    const sound = currentById.get(soundId);
+    if (!sound || includedIds.has(soundId)) return [];
+    includedIds.add(soundId);
+    return [sound];
+  });
+  return [...orderedCurrent, ...current.filter((sound) => !includedIds.has(sound.id))];
+}
+
 function resultValue<T>(result: SoundboardActionResult<T>): T | null {
   return result.ok && 'value' in result && result.value !== undefined ? result.value : null;
 }
@@ -561,7 +573,7 @@ export default function SoundManager({ initialSounds, currentUser, actions }: So
       setError(result.message);
       return;
     }
-    updateSounds(() => reordered);
+    updateSounds((current) => applySoundOrder(current, reordered.map((sound) => sound.id)));
     setAnnouncement(`${reordered[nextIndex].name} moved ${direction < 0 ? 'up' : 'down'}.`);
   }
 
