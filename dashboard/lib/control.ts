@@ -34,6 +34,7 @@ export interface SoundboardPlayPayload {
   gainDb: number;
   fadeInMs: number;
   fadeOutMs: number;
+  durationSec?: number;
 }
 
 export const SOUNDBOARD_BUSY_MESSAGE = 'Soundboard is busy — wait for the current sound to finish.';
@@ -67,12 +68,12 @@ async function sendSoundboardRequest(path: '/soundboard/play' | '/soundboard/sto
   if (!res.ok) throw new Error(data.error ?? `Bot returned HTTP ${res.status}`);
 }
 
-/** Starts one global sound as a one-shot overlay in the selected server's voice channel. */
+/** Starts one global sound in the selected server's voice channel. */
 export async function sendSoundboardPlay(payload: SoundboardPlayPayload): Promise<void> {
   await sendSoundboardRequest('/soundboard/play', payload);
 }
 
-/** Stops the selected server's soundboard overlay after bot-side channel validation. */
+/** Stops the selected server's soundboard clip after bot-side channel validation. */
 export async function sendSoundboardStop(guildId: string, channelId: string): Promise<void> {
   await sendSoundboardRequest('/soundboard/stop', { guildId, channelId });
 }

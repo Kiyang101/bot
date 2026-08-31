@@ -216,7 +216,7 @@ BOT_START_COMMAND=npm run prod
 | Script | What it does |
 | --- | --- |
 | `npm run dev` | Start the bot with auto-restart (`tsx watch`). |
-| `npm start` | Start the bot once with `tsx` (no compile). |
+| `npm start` | Compile and start the production bot. |
 | `npm run prod` | Compile to `dist/` and run the compiled build. |
 | `npm run serve` | Run the already-compiled build (`node dist/index.js`). |
 | `npm run build` / `npm run typecheck` | Compile / type-check only. |

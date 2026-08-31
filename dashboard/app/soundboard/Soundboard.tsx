@@ -129,7 +129,7 @@ export default function Soundboard({
       setActiveSoundId(sound.id);
       setStartedAt(Date.now());
       setElapsedSec(0);
-      setMessage(initialMusicState.current ? 'Playing over music.' : 'Playing.');
+      setMessage(initialMusicState.current ? 'Music paused while sound plays.' : 'Playing.');
     } catch {
       setMessage('Could not play this sound. Try again.');
     } finally {
@@ -375,7 +375,7 @@ export default function Soundboard({
           <div>
             <span className="section-title">Now playing</span>
             <strong>{activeSound?.name ?? 'No sound playing'}</strong>
-            {activeSound && <span className="muted">{initialMusicState.current ? 'Playing over music' : 'Playing'} · {formatDuration(Math.max(0, (activeDuration ?? 0) - elapsedSec))} remaining</span>}
+            {activeSound && <span className="muted">{initialMusicState.current ? 'Music paused' : 'Playing'} · {formatDuration(Math.max(0, (activeDuration ?? 0) - elapsedSec))} remaining</span>}
           </div>
         </div>
         <div className="soundboard-progress" aria-label="Sound progress">

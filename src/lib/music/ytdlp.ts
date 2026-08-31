@@ -303,17 +303,42 @@ export interface StreamOptions {
   url?: string;
   /** Output format. PCM is signed 16-bit little-endian, 48 kHz stereo. */
   output?: 'opus' | 'pcm';
+  /** Optional one-shot soundboard processing. */
+  gainDb?: number;
+  fadeInMs?: number;
+  fadeOutMs?: number;
+  /** Required to place a fade-out at the end of a one-shot clip. */
+  durationSec?: number;
 }
 
 /**
  * Combine the effect filter and volume into one ffmpeg `-af` chain. With Opus
  * passthrough there's no PCM stage for inline volume, so volume is applied here.
  */
-function buildFilterChain(effect: Effect, intensity: number, volume: number): string {
+function buildFilterChain(
+  effect: Effect,
+  intensity: number,
+  volume: number,
+  soundGainDb = 0,
+  fadeInMs = 0,
+  fadeOutMs = 0,
+  durationSec?: number,
+): string {
   const parts: string[] = [];
   const eff = buildEffectFilter(effect, intensity);
   if (eff) parts.push(eff);
   if (volume !== 100) parts.push(`volume=${Math.max(0, volume) / 100}`);
+  if (Number.isFinite(soundGainDb) && soundGainDb !== 0) {
+    parts.push(`volume=${10 ** (soundGainDb / 20)}`);
+  }
+  if (fadeInMs > 0) {
+    parts.push(`afade=t=in:st=0:d=${fadeInMs / 1_000}`);
+  }
+  if (fadeOutMs > 0 && Number.isFinite(durationSec) && (durationSec ?? 0) > 0) {
+    const fadeDuration = Math.min(fadeOutMs / 1_000, durationSec!);
+    const fadeStart = Math.max(0, durationSec! - fadeDuration);
+    parts.push(`afade=t=out:st=${fadeStart}:d=${fadeDuration}`);
+  }
   return parts.join(',');
 }
 
@@ -340,7 +365,7 @@ function opusArgs(filter: string): string[] {
   ];
 }
 
-/** ffmpeg output args for the mixer's 48 kHz stereo signed 16-bit PCM input. */
+/** ffmpeg output args for the legacy 48 kHz stereo signed 16-bit PCM path. */
 function pcmArgs(filter: string): string[] {
   return [
     '-vn',
@@ -429,8 +454,9 @@ function wrapFfmpeg(ff: ReturnType<typeof spawn>, label: string, alsoKill?: () =
  * - Seeking (`seekSec` > 0): ffmpeg reads the direct `url` and input-seeks with
  *   `-ss` before `-i` (fast, byte-range based).
  *
- * Output can be Ogg-Opus passthrough or raw 48 kHz stereo PCM for the per-guild
- * mixer. A direct `url` with no seek is used for server-resolved sound files.
+ * Output can be Ogg-Opus passthrough or raw 48 kHz stereo signed 16-bit PCM.
+ * Music and soundboard playback use Ogg-Opus so the Node process does not need
+ * to encode every 20 ms frame.
  */
 export function createAudioStream(opts: StreamOptions): AudioStream {
   const {
@@ -440,7 +466,15 @@ export function createAudioStream(opts: StreamOptions): AudioStream {
     seekSec = 0,
     output = 'opus',
   } = opts;
-  const filter = buildFilterChain(effect, intensity, volume);
+  const filter = buildFilterChain(
+    effect,
+    intensity,
+    volume,
+    opts.gainDb,
+    opts.fadeInMs,
+    opts.fadeOutMs,
+    opts.durationSec,
+  );
   const outputArgs = output === 'pcm' ? pcmArgs(filter) : opusArgs(filter);
 
   // Direct path: seekable music URL or a server-resolved sound file URL.

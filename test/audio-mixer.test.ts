@@ -329,7 +329,6 @@ const playBody: SoundboardBody = {
 test('MusicSession soundboard play and stop preserve active music state', async () => {
   const guildId = 'guild-preserve-music';
   const session = musicManager.getOrCreate(guildId);
-  const main = new PassThrough();
   const server = await startWavServer({
     '/overlay.wav': (res) => writeAudio(res, wavBuffer(1_000)),
   });
@@ -338,15 +337,12 @@ test('MusicSession soundboard play and stop preserve active music state', async 
     const unsafeSession = session as unknown as {
       current: Track | null;
       queue: Track[];
-      mixer: AudioMixer;
       player: { pause(): boolean; stop(force?: boolean): boolean };
       ensureConnection(channel: VoiceBasedChannel): VoiceConnection;
     };
     const nextTrack = { ...track, title: 'Queued Track', url: 'https://youtube.example.test/next' };
     unsafeSession.current = track;
     unsafeSession.queue = [nextTrack];
-    unsafeSession.mixer.setMain(main);
-    main.write(pcmFrame(4_000));
 
     let pauseCalls = 0;
     let stopCalls = 0;
@@ -377,7 +373,7 @@ test('MusicSession soundboard play and stop preserve active music state', async 
     assert.equal(stopCalls, 0);
     assert.deepEqual(session.getState().queue, [nextTrack]);
     assert.strictEqual(session.getState().current, track);
-    assert.equal(session.pause(), true);
+    assert.equal(session.pause(), false);
   } finally {
     session.stop();
     await server.close();

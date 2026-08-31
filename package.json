@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "tsx src/index.ts",
+    "start": "npm run prod",
     "dev": "tsx watch src/index.ts",
     "prod": "tsc && node dist/index.js",
     "serve": "node dist/index.js",

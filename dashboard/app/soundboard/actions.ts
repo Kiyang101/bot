@@ -461,6 +461,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
           gainDb: sound.gainDb,
           fadeInMs: sound.fadeInMs,
           fadeOutMs: sound.fadeOutMs,
+          durationSec: sound.durationSec ?? Math.max(0, (sound.trimEndMs - sound.trimStartMs) / 1_000),
         });
         return { ok: true, value: asClientSound(sound) };
       } catch (error) {

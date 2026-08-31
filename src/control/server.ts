@@ -161,6 +161,7 @@ export interface SoundboardBody {
   gainDb?: number;
   fadeInMs?: number;
   fadeOutMs?: number;
+  durationSec?: number;
 }
 
 type SoundboardSession = Pick<MusicSession, 'playSound' | 'stopSound'>;
@@ -246,10 +247,14 @@ export async function handleSoundboard(
   const gainDb = boundedNumber(body.gainDb, 0, -24, 12, 'gainDb');
   const fadeInMs = boundedNumber(body.fadeInMs, 0, 0, 5_000, 'fadeInMs', true);
   const fadeOutMs = boundedNumber(body.fadeOutMs, 0, 0, 5_000, 'fadeOutMs', true);
+  const durationSec = body.durationSec == null
+    ? undefined
+    : boundedNumber(body.durationSec, 0, 0, 86_400, 'durationSec');
   await sessions.getOrCreate(guildId).playSound(channel, audioUrl.href, {
     gainDb,
     fadeInMs,
     fadeOutMs,
+    durationSec,
   });
   return { ok: true };
 }

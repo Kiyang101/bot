@@ -971,14 +971,14 @@ $$;
 
 REVOKE ALL ON FUNCTION public.prepare_sound_trim_mutation(uuid, uuid, bigint, uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.prepare_sound_trim_mutation(uuid, uuid, bigint, uuid, text, text, integer, integer, numeric, numeric, text, text, bigint, bigint) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.prepare_sound_delete_mutation(uuid, uuid, bigint, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.prepare_sound_delete_mutation(uuid, uuid, bigint, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.mark_sound_mutation_recovery(uuid, uuid, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.complete_sound_mutation_recovery(uuid, uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.claim_sound_mutation_recovery(uuid, uuid, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.defer_sound_mutation_recovery(uuid, uuid, text, text, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.prepare_sound_trim_mutation(uuid, uuid, bigint, uuid, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.prepare_sound_trim_mutation(uuid, uuid, bigint, uuid, text, text, integer, integer, numeric, numeric, text, text, bigint, bigint) TO service_role;
-GRANT EXECUTE ON FUNCTION public.prepare_sound_delete_mutation(uuid, uuid, bigint, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.prepare_sound_delete_mutation(uuid, uuid, bigint, uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.mark_sound_mutation_recovery(uuid, uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_sound_mutation_recovery(uuid, uuid, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_sound_mutation_recovery(uuid, uuid, integer) TO service_role;

@@ -64,7 +64,7 @@ and the server-only `SUPABASE_SECRET_KEY` before anything that touches the DB.
 
 ## Gotchas
 
-- **Music needs the compiled build** to play smoothly: run `npm run prod` /
+- **Music needs the compiled build** to play smoothly: run `npm start`, `npm run prod`, or
   `npm run serve` with native `@discordjs/opus` and `sodium-native` installed.
   `tsx` dev mode stutters audio.
 - **`dist/` is build output and git-ignored** — never edit files there; edit

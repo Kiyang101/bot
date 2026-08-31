@@ -28,7 +28,6 @@ import { EFFECTS, DEFAULT_INTENSITY, DEFAULT_VOLUME } from './types';
 import { createAudioStream, getStreamUrl, effectPlaybackRate, type AudioStream } from './ytdlp';
 import { nowPlayingEmbed, controlComponents } from './ui';
 import { registerDuckable, unregisterDuckable } from '../voice/ducking';
-import { AudioMixer, type OverlayOptions } from '../voice/audioMixer';
 import { assertSupabaseResult } from '../database';
 import { getSupabaseAdmin } from '../supabase';
 
@@ -93,8 +92,9 @@ class MusicSession {
   private readonly guildId: string;
   private connection: VoiceConnection | null = null;
   private readonly player: AudioPlayer;
-  private readonly mixer: AudioMixer;
-  private readonly currentResource: AudioResource;
+  /** Soundboard has its own player; only one player is subscribed at a time. */
+  private readonly soundPlayer: AudioPlayer;
+  private currentResource: AudioResource | null = null;
 
   private queue: Track[] = [];
   private current: Track | null = null;
@@ -106,7 +106,9 @@ class MusicSession {
   /** Invalidates async main-stream work that no longer owns playback state. */
   private streamGeneration = 0;
   private currentSoundStream: AudioStream | null = null;
+  private musicPausedForSound = false;
   private soundRequest: symbol | null = null;
+  private suppressIdleAdvance = false;
   /** Direct media URL for the current track (resolved once, reused for seeks). */
   private currentUrl: string | null = null;
   /** Seconds the current ffmpeg stream was started at (the seek offset). */
@@ -121,40 +123,61 @@ class MusicSession {
 
   constructor(guildId: string) {
     this.guildId = guildId;
-    this.mixer = new AudioMixer();
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
-    this.currentResource = createAudioResource(this.mixer, {
-      inputType: StreamType.Raw,
+    this.soundPlayer = createAudioPlayer({
+      behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
-    this.player.play(this.currentResource);
 
-    // The player resource is permanent; natural main-source completion drives
-    // the music queue while leaving any soundboard overlay untouched.
-    this.mixer.on('mainEnded', () => {
-      this.streamGeneration += 1;
-      // A track that "finishes" almost instantly never really played — usually
-      // a failed download or an empty stream. Flag it so it's not a silent skip.
-      const playedMs = this.mixer.mainPlaybackDurationMs;
-      if (this.current && playedMs < 500) {
-        console.warn(`[music] "${this.current.title}" produced no audio (played ${playedMs}ms) — skipping.`);
+    // Natural music completion drives the queue. A soundboard switch pauses
+    // this player, so it cannot be mistaken for a completed track.
+    this.player.on(AudioPlayerStatus.Idle, () => {
+      if (this.current && !this.leaving && !this.suppressIdleAdvance) {
+        this.currentResource = null;
+        const completed = this.currentStream;
+        this.currentStream = null;
+        completed?.destroy();
+        void this.advance();
       }
-      const completed = this.currentStream;
-      this.currentStream = null;
-      completed?.destroy();
-      if (!this.leaving) void this.advance();
-    });
-    this.mixer.on('overlayEnded', () => {
-      this.soundRequest = null;
-      const completed = this.currentSoundStream;
-      this.currentSoundStream = null;
-      completed?.destroy();
-      if (!this.leaving && this.hasNothingPlaying()) this.startIdleTimer();
     });
     this.player.on('error', (err) => {
       console.error(`[music] player error in guild ${this.guildId}:`, err.message);
     });
+
+    this.soundPlayer.on(AudioPlayerStatus.Idle, () => {
+      if (this.currentSoundStream || this.soundRequest) this.finishSound();
+    });
+    this.soundPlayer.on('error', (err) => {
+      console.error(`[soundboard] player error in guild ${this.guildId}:`, err.message);
+      this.finishSound();
+    });
+  }
+
+  private registerMusicOwner(connection: VoiceConnection): void {
+    registerDuckable(this.guildId, {
+      pause: () => this.player.pause(),
+      resume: () => {
+        connection.subscribe(this.player);
+        this.player.unpause();
+      },
+    });
+  }
+
+  private finishSound(): void {
+    const completed = this.currentSoundStream;
+    this.currentSoundStream = null;
+    this.soundRequest = null;
+    completed?.destroy();
+
+    if (this.musicPausedForSound) {
+      this.musicPausedForSound = false;
+      if (!this.leaving && this.connection) {
+        this.connection.subscribe(this.player);
+        this.player.unpause();
+      }
+    }
+    if (!this.leaving && this.hasNothingPlaying()) this.startIdleTimer();
   }
 
   // ---- Connection ---------------------------------------------------------
@@ -201,13 +224,7 @@ class MusicSession {
     this.queue.push(...toAdd);
 
     const connection = this.ensureConnection(voiceChannel);
-    registerDuckable(this.guildId, {
-      pause: () => this.player.pause(),
-      resume: () => {
-        connection.subscribe(this.player);
-        this.player.unpause();
-      },
-    });
+    this.registerMusicOwner(connection);
 
     let startedNow = false;
     if (!this.current) {
@@ -218,11 +235,11 @@ class MusicSession {
     return { startedNow, added: toAdd.length };
   }
 
-  /** Decode and mix one server-resolved sound without changing music state. */
+  /** Play one server-resolved sound on a separate player, pausing music first. */
   async playSound(
     channel: VoiceBasedChannel,
     audioUrl: string,
-    options: OverlayOptions,
+    options: { gainDb: number; fadeInMs: number; fadeOutMs: number; durationSec?: number },
   ): Promise<void> {
     if (channel.guild.id !== this.guildId) {
       throw new Error('Soundboard channel belongs to a different Discord server.');
@@ -238,31 +255,43 @@ class MusicSession {
     this.leaving = false;
     this.clearIdleTimer();
     let audio: AudioStream | null = null;
+    let connection: VoiceConnection | null = null;
     try {
-      const connection = this.ensureConnection(channel);
-      registerDuckable(this.guildId, {
-        pause: () => this.player.pause(),
-        resume: () => {
-          connection.subscribe(this.player);
-          this.player.unpause();
-        },
-      });
+      connection = this.ensureConnection(channel);
+      this.registerMusicOwner(connection);
       await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
       if (this.soundRequest !== request) {
         throw new Error('Soundboard playback was stopped before it started.');
       }
 
-      audio = createAudioStream({ url: audioUrl, output: 'pcm' });
+      audio = createAudioStream({
+        url: audioUrl,
+        output: 'opus',
+        gainDb: options.gainDb,
+        fadeInMs: options.fadeInMs,
+        fadeOutMs: options.fadeOutMs,
+        durationSec: options.durationSec,
+      });
       this.currentSoundStream = audio;
       await audio.ready;
       if (this.soundRequest !== request || this.currentSoundStream !== audio) {
         throw new Error('Soundboard playback was stopped before it started.');
       }
-      if (!this.mixer.startOverlay(audio.stream, options)) throw new SoundboardBusyError();
+      const musicStatus = this.player.state.status;
+      this.musicPausedForSound = musicStatus === AudioPlayerStatus.Playing
+        || musicStatus === AudioPlayerStatus.Buffering;
+      if (this.musicPausedForSound) this.player.pause();
+      connection.subscribe(this.soundPlayer);
+      this.soundPlayer.play(createAudioResource(audio.stream, { inputType: StreamType.OggOpus }));
     } catch (error) {
       if (this.currentSoundStream === audio) this.currentSoundStream = null;
       audio?.destroy();
       if (this.soundRequest === request) this.soundRequest = null;
+      if (this.musicPausedForSound) {
+        this.musicPausedForSound = false;
+        connection?.subscribe(this.player);
+        this.player.unpause();
+      }
       if (!this.leaving && this.hasNothingPlaying()) this.startIdleTimer();
       throw error;
     }
@@ -270,11 +299,9 @@ class MusicSession {
 
   /** Stop only the one-shot overlay, leaving music and its queue untouched. */
   stopSound(): void {
-    this.soundRequest = null;
-    const current = this.currentSoundStream;
-    this.currentSoundStream = null;
-    this.mixer.stopOverlay();
-    current?.destroy();
+    if (!this.soundRequest && !this.currentSoundStream && !this.musicPausedForSound) return;
+    this.soundPlayer.stop(true);
+    this.finishSound();
   }
 
   /** Play the next track honoring the loop mode. Stops if the queue is empty. */
@@ -289,9 +316,9 @@ class MusicSession {
 
     if (!next) {
       this.current = null;
-      this.mixer.clearMain();
       this.currentStream?.destroy();
       this.currentStream = null;
+      this.currentResource = null;
       this.currentUrl = null;
       this.seekBaseSec = 0;
       await this.refreshNowPlaying();
@@ -324,8 +351,7 @@ class MusicSession {
     const isCurrentOperation = () => generation === this.streamGeneration;
 
     // Build the NEW stream first (URL resolution may await). We must NOT tear
-    // down the currently-playing stream until the replacement is ready. The
-    // old source remains in the mixer until the new source has decoded bytes.
+    // down the currently-playing stream until the replacement is ready.
     let audio: AudioStream | null = null;
 
     try {
@@ -343,7 +369,7 @@ class MusicSession {
           intensity: this.intensity,
           volume: this.volume,
           seekSec,
-          output: 'pcm',
+          output: 'opus',
         });
       } else {
         // Normal playback uses the robust yt-dlp pipe.
@@ -352,7 +378,7 @@ class MusicSession {
           effect: this.effect,
           intensity: this.intensity,
           volume: this.volume,
-          output: 'pcm',
+          output: 'opus',
         });
       }
 
@@ -371,7 +397,8 @@ class MusicSession {
     const previous = this.currentStream;
     this.currentStream = audio;
     this.seekBaseSec = seekSec;
-    this.mixer.setMain(audio.stream);
+    this.currentResource = createAudioResource(audio.stream, { inputType: StreamType.OggOpus });
+    this.player.play(this.currentResource);
     // New main source is installed — safe to kill the old stream's processes.
     previous?.destroy();
     return true;
@@ -384,7 +411,7 @@ class MusicSession {
    */
   private positionSec(): number {
     if (!this.current) return 0;
-    const played = this.mixer.mainPlaybackDurationMs / 1000;
+    const played = (this.currentResource?.playbackDuration ?? 0) / 1_000;
     const pos = this.seekBaseSec + played * effectPlaybackRate(this.effect, this.intensity);
     const dur = this.current?.durationSec;
     return dur != null ? Math.min(pos, dur) : pos;
@@ -433,8 +460,11 @@ class MusicSession {
     }
     const current = this.currentStream;
     this.currentStream = null;
-    this.mixer.clearMain();
     current?.destroy();
+    this.currentResource = null;
+    this.suppressIdleAdvance = true;
+    this.player.stop(true);
+    this.suppressIdleAdvance = false;
     if (!this.leaving) void this.advance();
     return skipped;
   }
@@ -446,15 +476,15 @@ class MusicSession {
     this.queue = [];
     this.current = null;
     this.stopSound();
-    this.mixer.clearMain();
     this.currentStream?.destroy();
     this.currentStream = null;
+    this.currentResource = null;
     this.currentUrl = null;
     this.seekBaseSec = 0;
     this.loop = 'off';
     this.clearIdleTimer();
     this.player.stop(true);
-    this.mixer.destroy();
+    this.soundPlayer.stop(true);
     unregisterDuckable(this.guildId);
     getVoiceConnection(this.guildId)?.destroy();
     this.connection = null;
@@ -464,13 +494,13 @@ class MusicSession {
   }
 
   pause(): boolean {
-    const ok = this.mixer.pauseMain();
+    const ok = this.player.pause();
     void this.refreshNowPlaying();
     return ok;
   }
 
   resume(): boolean {
-    const ok = this.mixer.resumeMain();
+    const ok = this.player.unpause();
     void this.refreshNowPlaying();
     return ok;
   }
@@ -554,7 +584,6 @@ class MusicSession {
 
   isPaused(): boolean {
     return (
-      this.mixer.isMainPaused ||
       this.player.state.status === AudioPlayerStatus.Paused ||
       this.player.state.status === AudioPlayerStatus.AutoPaused
     );
