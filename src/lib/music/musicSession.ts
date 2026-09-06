@@ -170,13 +170,17 @@ class MusicSession {
     this.soundRequest = null;
     completed?.destroy();
 
-    if (this.musicPausedForSound) {
-      this.musicPausedForSound = false;
-      if (!this.leaving && this.connection) {
-        this.connection.subscribe(this.player);
+    if (!this.leaving && this.connection) {
+      // VoiceConnection supports one subscribed player at a time. Hand the
+      // connection back after the one-shot ends, even when music was already
+      // paused or there was no music yet. Otherwise the next /play starts the
+      // music player off-connection and Discord receives no audio.
+      this.connection.subscribe(this.player);
+      if (this.musicPausedForSound) {
         this.player.unpause();
       }
     }
+    this.musicPausedForSound = false;
     if (!this.leaving && this.hasNothingPlaying()) this.startIdleTimer();
   }
 
@@ -266,7 +270,10 @@ class MusicSession {
 
       audio = createAudioStream({
         url: audioUrl,
-        output: 'opus',
+        // Soundboard clips are short and need maximum compatibility with the
+        // installed @discordjs/voice stack. Feed decoded PCM to the player;
+        // the voice adapter performs the Opus encoding for Discord.
+        output: 'pcm',
         gainDb: options.gainDb,
         fadeInMs: options.fadeInMs,
         fadeOutMs: options.fadeOutMs,
@@ -282,7 +289,7 @@ class MusicSession {
         || musicStatus === AudioPlayerStatus.Buffering;
       if (this.musicPausedForSound) this.player.pause();
       connection.subscribe(this.soundPlayer);
-      this.soundPlayer.play(createAudioResource(audio.stream, { inputType: StreamType.OggOpus }));
+      this.soundPlayer.play(createAudioResource(audio.stream, { inputType: StreamType.Raw }));
     } catch (error) {
       if (this.currentSoundStream === audio) this.currentSoundStream = null;
       audio?.destroy();

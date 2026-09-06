@@ -73,7 +73,7 @@ export default async function MusicPage() {
       <p className="hint">
         {channels.length === 0
           ? "No voice channels found — check the bot token / that the bot is in the server."
-          : "The bot joins the channel you pick. Search by name or paste a YouTube URL."}
+          : "The bot joins your current voice channel automatically, or use the selector to choose a room."}
       </p>
     </main>
   );

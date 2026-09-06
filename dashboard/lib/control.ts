@@ -29,7 +29,9 @@ export interface SpeakPayload {
 
 export interface SoundboardPlayPayload {
   guildId: string;
-  channelId: string;
+  /** Omit to use the requesting user's current voice channel. */
+  channelId?: string;
+  userId?: string;
   audioUrl: string;
   gainDb: number;
   fadeInMs: number;
@@ -74,8 +76,8 @@ export async function sendSoundboardPlay(payload: SoundboardPlayPayload): Promis
 }
 
 /** Stops the selected server's soundboard clip after bot-side channel validation. */
-export async function sendSoundboardStop(guildId: string, channelId: string): Promise<void> {
-  await sendSoundboardRequest('/soundboard/stop', { guildId, channelId });
+export async function sendSoundboardStop(guildId: string, channelId?: string): Promise<void> {
+  await sendSoundboardRequest('/soundboard/stop', { guildId, ...(channelId ? { channelId } : {}) });
 }
 
 /** Ask the bot to speak. Returns the spoken text, or throws with the bot's error. */
@@ -206,6 +208,7 @@ export interface MusicCommand {
   guildId: string;
   action: MusicAction;
   channelId?: string;
+  userId?: string;
   query?: string;
   level?: number;
   mode?: LoopMode;

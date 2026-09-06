@@ -60,7 +60,7 @@ export default function MusicPlayer({
   initialHistory: MusicHistoryItem[];
   isAdmin: boolean;
 }) {
-  const [channelId, setChannelId] = useState(channels[0]?.id ?? '');
+  const [channelId, setChannelId] = useState(initialState.channelId ?? '');
   const [query, setQuery] = useState('');
   const [state, setState] = useState<MusicState>(initialState);
   const [history, setHistory] = useState<MusicHistoryItem[]>(initialHistory);
@@ -236,9 +236,9 @@ export default function MusicPlayer({
       {/* Add to queue */}
       <form className="music-add" onSubmit={handlePlay}>
         <div className="row">
-          <select value={channelId} required onChange={(e) => setChannelId(e.target.value)}>
-            <option value="" disabled>
-              — Voice channel —
+          <select value={channelId} onChange={(e) => setChannelId(e.target.value)}>
+            <option value="">
+              🎙️ My current voice channel (automatic)
             </option>
             {channels.map((c) => (
               <option key={c.id} value={c.id}>

@@ -64,7 +64,7 @@ export interface TrimSoundInput {
 
 export interface PlaySoundInput {
   soundId: string;
-  channelId: string;
+  channelId?: string;
 }
 
 export interface SoundboardActionDependencies {
@@ -151,7 +151,7 @@ export interface SoundboardActionDependencies {
     trimEndMs: number;
   }) => Promise<{ buffer: Buffer; durationSec: number; sourceDurationSec: number }>;
   sendSoundboardPlay: (payload: SoundboardPlayPayload) => Promise<void>;
-  sendSoundboardStop: (guildId: string, channelId: string) => Promise<void>;
+  sendSoundboardStop: (guildId: string, channelId?: string) => Promise<void>;
   revalidatePath: (path: string) => void;
   createSoundId: () => string;
 }
@@ -439,7 +439,6 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       const soundId = validSoundId(input?.soundId);
       if (!soundId) return { ok: false, message: 'Sound id is required.' };
       const channelId = validChannelId(input?.channelId);
-      if (!channelId) return { ok: false, message: 'Pick a voice channel first.' };
       const guildId = await dependencies.getSelectedGuildId();
       if (!guildId) return { ok: false, message: 'No server selected.' };
 
@@ -448,7 +447,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         if (!authorizedGuildIds.includes(guildId)) {
           return { ok: false, message: 'You are not a member of the selected server.' };
         }
-        if (!await dependencies.canMemberUseVoiceChannel(guildId, channelId, user.id)) {
+        if (channelId && !await dependencies.canMemberUseVoiceChannel(guildId, channelId, user.id)) {
           return { ok: false, message: 'Pick a voice channel you can view and connect to in the selected server.' };
         }
         const sound = await dependencies.getSound(soundId);
@@ -456,7 +455,7 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         const audioUrl = await dependencies.getSignedSoundUrl(sound.storagePath);
         await dependencies.sendSoundboardPlay({
           guildId,
-          channelId,
+          ...(channelId ? { channelId } : { userId: user.id }),
           audioUrl,
           gainDb: sound.gainDb,
           fadeInMs: sound.fadeInMs,
@@ -469,11 +468,10 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
       }
     },
 
-    async stopSound(channelId: string): Promise<SoundboardActionResult> {
+    async stopSound(channelId?: string): Promise<SoundboardActionResult> {
       const user = await requireUser(dependencies);
       if (!user) return { ok: false, message: 'Not authenticated.' };
       const normalizedChannelId = validChannelId(channelId);
-      if (!normalizedChannelId) return { ok: false, message: 'Pick a voice channel first.' };
       const guildId = await dependencies.getSelectedGuildId();
       if (!guildId) return { ok: false, message: 'No server selected.' };
 
@@ -482,10 +480,10 @@ export function createSoundboardActions(dependencies: SoundboardActionDependenci
         if (!authorizedGuildIds.includes(guildId)) {
           return { ok: false, message: 'You are not a member of the selected server.' };
         }
-        if (!await dependencies.canMemberUseVoiceChannel(guildId, normalizedChannelId, user.id)) {
+        if (normalizedChannelId && !await dependencies.canMemberUseVoiceChannel(guildId, normalizedChannelId, user.id)) {
           return { ok: false, message: 'Pick a voice channel you can view and connect to in the selected server.' };
         }
-        await dependencies.sendSoundboardStop(guildId, normalizedChannelId);
+        await dependencies.sendSoundboardStop(guildId, normalizedChannelId ?? undefined);
         return { ok: true };
       } catch (error) {
         return actionError(error, 'Failed to stop sound.');
@@ -1125,7 +1123,7 @@ export async function playSound(input: PlaySoundInput): Promise<SoundboardAction
   return (await actionsForRequest()).playSound(input);
 }
 
-export async function stopSound(channelId: string): Promise<SoundboardActionResult> {
+export async function stopSound(channelId?: string): Promise<SoundboardActionResult> {
   'use server';
   return (await actionsForRequest()).stopSound(channelId);
 }

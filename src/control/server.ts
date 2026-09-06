@@ -144,6 +144,7 @@ function handleLeave(body: { guildId?: string }): void {
 interface MusicBody {
   guildId?: string;
   channelId?: string;
+  userId?: string;
   action?: string;
   query?: string;
   level?: number;
@@ -157,6 +158,7 @@ interface MusicBody {
 export interface SoundboardBody {
   guildId?: string;
   channelId?: string;
+  userId?: string;
   audioUrl?: string;
   gainDb?: number;
   fadeInMs?: number;
@@ -206,6 +208,26 @@ async function resolveSoundboardChannel(
   return channel as VoiceBasedChannel;
 }
 
+/** Resolve an explicit dashboard destination, or the dashboard user's live voice channel. */
+async function resolveDashboardVoiceChannel(
+  client: Client,
+  guildId: string,
+  channelId: string | undefined,
+  userId: string | undefined,
+): Promise<VoiceBasedChannel> {
+  const explicitId = channelId?.trim();
+  if (explicitId) return resolveSoundboardChannel(client, explicitId, guildId);
+  const memberId = userId?.trim();
+  if (!memberId) throw new Error('channelId or userId is required');
+  const guild = client.guilds.cache.get(guildId);
+  const member = guild?.members.cache.get(memberId);
+  const currentChannel = member?.voice.channel;
+  if (!currentChannel || !currentChannel.isVoiceBased()) {
+    throw new Error('You must be in a voice channel to use automatic connection.');
+  }
+  return currentChannel as VoiceBasedChannel;
+}
+
 /** Handle a one-shot soundboard command without mutating the music queue. */
 export async function handleSoundboard(
   client: Client,
@@ -220,9 +242,9 @@ export async function handleSoundboard(
   }
 
   const channelId = (body.channelId ?? '').trim();
-  if (!channelId) throw new Error('channelId is required');
 
   if (action === 'stop') {
+    if (!channelId) throw new Error('channelId is required');
     await resolveSoundboardChannel(client, channelId, guildId);
     const session = sessions.get(guildId);
     // Stop is idempotent so a reload or second tab can safely request it even
@@ -242,7 +264,7 @@ export async function handleSoundboard(
     throw new Error('audioUrl must be a server-resolved HTTP(S) URL');
   }
 
-  const channel = await resolveSoundboardChannel(client, channelId, guildId);
+  const channel = await resolveDashboardVoiceChannel(client, guildId, channelId, body.userId);
 
   const gainDb = boundedNumber(body.gainDb, 0, -24, 12, 'gainDb');
   const fadeInMs = boundedNumber(body.fadeInMs, 0, 0, 5_000, 'fadeInMs', true);
@@ -260,11 +282,18 @@ export async function handleSoundboard(
 }
 
 export function soundboardErrorResponse(error: unknown): {
-  status: 409 | 500;
+  status: 400 | 409 | 500;
   payload: { error: string };
 } {
   if (error instanceof SoundboardBusyError) {
     return { status: 409, payload: { error: 'soundboard_busy' } };
+  }
+  if (error instanceof Error && (
+    error.message === 'channelId is required'
+    || error.message === 'channelId or userId is required'
+    || error.message === 'You must be in a voice channel to use automatic connection.'
+  )) {
+    return { status: 400, payload: { error: error.message } };
   }
   return {
     status: 500,
@@ -303,16 +332,9 @@ async function handleMusic(client: Client, body: MusicBody): Promise<Record<stri
   if (body.action === 'play') {
     const channelId = (body.channelId ?? '').trim();
     const query = (body.query ?? '').trim();
-    if (!channelId) throw new Error('channelId is required');
     if (!query) throw new Error('query is required');
 
-    const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (!channel || !channel.isVoiceBased()) {
-      throw new Error('channelId is not a voice channel the bot can see');
-    }
-    if (channel.guild?.id !== guildId) {
-      throw new Error('channelId belongs to a different Discord server than guildId');
-    }
+    const channel = await resolveDashboardVoiceChannel(client, guildId, channelId, body.userId);
 
     const { tracks, kind } = await resolveTracks(query, 'dashboard', 'Dashboard');
     if (tracks.length === 0) throw new Error('No results found for that query.');

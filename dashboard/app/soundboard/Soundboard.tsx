@@ -8,8 +8,8 @@ import type { SoundboardActionResult, SoundboardSound } from './actions';
 const DEFAULT_CATEGORIES: string[] = [...SOUND_CATEGORIES];
 
 export interface SoundboardActions {
-  playSound: (input: { soundId: string; channelId: string }) => Promise<SoundboardActionResult<SoundboardSound>>;
-  stopSound: (channelId: string) => Promise<SoundboardActionResult>;
+  playSound: (input: { soundId: string; channelId?: string }) => Promise<SoundboardActionResult<SoundboardSound>>;
+  stopSound: (channelId?: string) => Promise<SoundboardActionResult>;
   getSoundPlayableUrl: (soundId: string) => Promise<SoundboardActionResult<string>>;
 }
 
@@ -60,7 +60,7 @@ export default function Soundboard({
 }: SoundboardProps) {
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('All');
-  const [channelId, setChannelId] = useState(initialMusicState.channelId ?? channels[0]?.id ?? '');
+  const [channelId, setChannelId] = useState(initialMusicState.channelId ?? '');
   const [activeSoundId, setActiveSoundId] = useState<string | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [startedAt, setStartedAt] = useState<number | null>(null);
@@ -89,14 +89,14 @@ export default function Soundboard({
   }, [category, currentUser.id, search, sounds]);
 
   const activeSound = activeSoundId ? sounds.find((sound) => sound.id === activeSoundId) ?? null : null;
-  const playbackAvailable = Boolean(selectedGuildId && channelId && botStatus === 'RUNNING');
+  const playbackAvailable = Boolean(selectedGuildId && botStatus === 'RUNNING');
   const activeDuration = activeSound
     ? activeSound.durationSec ?? Math.max(0, (activeSound.trimEndMs - activeSound.trimStartMs) / 1_000)
     : null;
 
   useEffect(() => {
-    if (!channelId || !channels.some((channel) => channel.id === channelId)) {
-      setChannelId(channels[0]?.id ?? '');
+    if (channelId && !channels.some((channel) => channel.id === channelId)) {
+      setChannelId('');
     }
   }, [channelId, channels]);
 
@@ -121,7 +121,7 @@ export default function Soundboard({
     setPendingSoundId(sound.id);
     setMessage(null);
     try {
-      const result = await actions.playSound({ soundId: sound.id, channelId });
+      const result = await actions.playSound({ soundId: sound.id, ...(channelId ? { channelId } : {}) });
       if (!result.ok) {
         setMessage(result.message);
         return;
@@ -272,7 +272,7 @@ export default function Soundboard({
         <label className="soundboard-channel">
           Voice channel
           <select value={channelId} onChange={(event) => setChannelId(event.target.value)} disabled={!selectedGuildId || Boolean(initialMusicState.channelId)}>
-            <option value="">Choose a channel</option>
+            <option value="">My current voice channel (automatic)</option>
             {channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}
           </select>
         </label>
@@ -281,7 +281,7 @@ export default function Soundboard({
             ? 'The bot is unavailable. Preview sounds here and reconnect the bot to play them in Discord.'
             : initialMusicState.channelName
               ? `Connected in ${initialMusicState.channelName}.`
-              : 'The first sound will join the selected voice channel.'}
+              : 'The first sound will join your current voice channel, or the selected room.'}
         </p>
       </section>
 

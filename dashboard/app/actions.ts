@@ -306,13 +306,14 @@ export async function fetchMusicState(): Promise<MusicState | null> {
 
 /** Queue a song or YouTube playlist. */
 export async function playMusic(channelId: string, query: string): Promise<MusicActionState> {
+  const user = await getSessionUser();
+  if (!user) return { ok: false, message: 'Not authenticated.' };
   const guildId = await getSelectedGuildId();
   if (!guildId) return { ok: false, message: 'No server selected.' };
-  if (!channelId) return { ok: false, message: 'Pick a voice channel first.' };
   if (!query.trim()) return { ok: false, message: 'Enter a song name or YouTube URL.' };
 
   try {
-    const res = await sendMusicCommand({ guildId, action: 'play', channelId, query: query.trim() });
+    const res = await sendMusicCommand({ guildId, action: 'play', ...(channelId ? { channelId } : { userId: user.id }), query: query.trim() });
     const title = (res.title as string) ?? 'track';
     const added = (res.added as number) ?? 0;
     const startedNow = res.startedNow as boolean;
