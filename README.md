@@ -15,6 +15,9 @@ folders, so adding a feature is usually just dropping in a new file.
   terms) with a full queue, loop modes, shuffle, seek, volume, and audio
   effects. Audio is pulled with `yt-dlp` via the bundled `youtube-dl-exec`, so
   no separate install is needed.
+- **🔊 Soundboard** — manage short sound clips in the web dashboard, preview
+  them in the browser, and play them as one-shot audio without interrupting
+  the music queue.
 - **🗣️ Text-to-speech** — `/say` makes the bot speak in your voice channel, and
   `/sayjp` speaks in a Japanese anime voice via [VOICEVOX](https://voicevox.hiroshiba.jp/).
   Pluggable TTS providers (OpenAI, Gemini, VOICEVOX, Google Translate TTS).
@@ -181,8 +184,8 @@ You should see `✅ Logged in as ...` in the console. Try `/ping` in your server
 ## Web dashboard (optional)
 
 The dashboard lives in `dashboard/` (a workspace package). It reads voice
-activity from the database and can tell the running bot to speak or play music
-via the local control endpoint.
+activity from the database and can tell the running bot to speak, play music,
+or trigger soundboard clips via the local control endpoint.
 
 ```bash
 cd dashboard
@@ -198,6 +201,12 @@ update the corresponding `DashboardUser.role` to `admin` for full access.
 remain blank in production. Supabase Auth handles the Discord OAuth exchange
 and session cookies; configure its provider and redirect URLs as described in
 the Supabase setup section above.
+
+On the Music and Soundboard pages, playback defaults to the logged-in user's
+current Discord voice channel. The bot joins that channel when a request is
+made; users can also choose a different voice channel from the selector when
+they have permission to view and connect to it. Automatic playback requires
+the user to already be in a voice channel in the selected server.
 
 Local admins can use the **Start bot** and **Stop bot**
 controls on the Voice Activity page; start uses `BOT_START_COMMAND` (default
