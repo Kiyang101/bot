@@ -5,16 +5,16 @@ import { EventEmitter, once } from 'node:events';
 import { PassThrough, Readable } from 'node:stream';
 import { VoiceConnectionStatus, type VoiceConnection } from '@discordjs/voice';
 import type { Client, VoiceBasedChannel } from 'discord.js';
-import type { Track } from '../src/lib/music/types';
-import { AudioMixer } from '../src/lib/voice/audioMixer';
-import { createAudioStream } from '../src/lib/music/ytdlp';
-import { musicManager, SoundboardBusyError } from '../src/lib/music/musicSession';
+import type { Track } from '../src/features/music/types';
+import { AudioMixer } from '../src/audio/audioMixer';
+import { createAudioStream } from '../src/features/music/ytdlp';
+import { musicManager, SoundboardBusyError } from '../src/features/music/musicSession';
 import {
   handleSoundboard,
   soundboardErrorResponse,
   type SoundboardBody,
   type SoundboardSessions,
-} from '../src/control/server';
+} from '../src/control/handlers/soundboard';
 
 const FRAME_BYTES = 48_000 / 50 * 2 * 2;
 function pcmFrame(sample: number): Buffer {

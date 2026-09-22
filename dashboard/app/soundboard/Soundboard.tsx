@@ -254,6 +254,7 @@ export default function Soundboard({
             <strong>{guildName ?? 'No server selected'}</strong>
           </div>
           <a className="secondary soundboard-manage-link" href="/soundboard/manage">Manage sounds</a>
+          <a className="secondary soundboard-manage-link" href="/soundboard/entrance">My entrance sound</a>
         </div>
       </header>
 

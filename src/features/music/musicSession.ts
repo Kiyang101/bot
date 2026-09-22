@@ -3,9 +3,9 @@
  *
  * Owns its own `AudioPlayer` and the guild's single `VoiceConnection`, drives a
  * track queue, and renders a now-playing message with control buttons. It is a
- * sibling of the TTS `SpeakSession` (src/lib/voiceAI/session.ts): both share the
+ * sibling of the TTS `SpeakSession` (src/features/speech/session.ts): both share the
  * one per-guild voice connection, coordinating through the ducking registry
- * (src/lib/voice/ducking.ts) so speech can interrupt music and resume it.
+ * (src/audio/ducking.ts) so speech can interrupt music and resume it.
  */
 
 import {
@@ -27,9 +27,10 @@ import type { Track, LoopMode, MusicState, Effect } from './types';
 import { EFFECTS, DEFAULT_INTENSITY, DEFAULT_VOLUME } from './types';
 import { createAudioStream, getStreamUrl, effectPlaybackRate, type AudioStream } from './ytdlp';
 import { nowPlayingEmbed, controlComponents } from './ui';
-import { registerDuckable, unregisterDuckable } from '../voice/ducking';
-import { assertSupabaseResult } from '../database';
-import { getSupabaseAdmin } from '../supabase';
+import { registerDuckable, unregisterDuckable } from '../../audio/ducking';
+import { assertSupabaseResult } from '../../infrastructure/database';
+import { getSupabaseAdmin } from '../../infrastructure/supabase';
+import { claimAudio, ownsAudio, releaseAudio, type AudioOwner } from '../../audio/oneShotOwnership';
 
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -108,6 +109,8 @@ class MusicSession {
   private currentSoundStream: AudioStream | null = null;
   private musicPausedForSound = false;
   private soundRequest: symbol | null = null;
+  private soundOwner: AudioOwner | null = null;
+  private soundDeadline: NodeJS.Timeout | null = null;
   private suppressIdleAdvance = false;
   /** Direct media URL for the current track (resolved once, reused for seeks). */
   private currentUrl: string | null = null;
@@ -165,12 +168,17 @@ class MusicSession {
   }
 
   private finishSound(): void {
+    if (!this.soundOwner && !this.soundRequest && !this.currentSoundStream && !this.musicPausedForSound) return;
+    const owner = this.soundOwner;
+    this.soundOwner = null;
+    if (this.soundDeadline) clearTimeout(this.soundDeadline);
+    this.soundDeadline = null;
     const completed = this.currentSoundStream;
     this.currentSoundStream = null;
     this.soundRequest = null;
     completed?.destroy();
 
-    if (!this.leaving && this.connection) {
+    if (!this.leaving && this.connection && (!owner || ownsAudio(this.guildId, owner))) {
       // VoiceConnection supports one subscribed player at a time. Hand the
       // connection back after the one-shot ends, even when music was already
       // paused or there was no music yet. Otherwise the next /play starts the
@@ -181,6 +189,7 @@ class MusicSession {
       }
     }
     this.musicPausedForSound = false;
+    if (owner) releaseAudio(this.guildId, owner);
     if (!this.leaving && this.hasNothingPlaying()) this.startIdleTimer();
   }
 
@@ -243,7 +252,7 @@ class MusicSession {
   async playSound(
     channel: VoiceBasedChannel,
     audioUrl: string,
-    options: { gainDb: number; fadeInMs: number; fadeOutMs: number; durationSec?: number },
+    options: { gainDb: number; fadeInMs: number; fadeOutMs: number; durationSec?: number; entrance?: { valid: () => boolean; deadline: number; owner: AudioOwner } },
   ): Promise<void> {
     if (channel.guild.id !== this.guildId) {
       throw new Error('Soundboard channel belongs to a different Discord server.');
@@ -253,6 +262,10 @@ class MusicSession {
       throw new Error(`Soundboard playback must use the active voice channel ${activeChannelId}.`);
     }
     if (this.soundRequest || this.currentSoundStream) throw new SoundboardBusyError();
+    const entrance = options.entrance;
+    const owner: AudioOwner = entrance?.owner ?? { kind: 'sound' };
+    if (entrance ? !ownsAudio(this.guildId, owner) : !claimAudio(this.guildId, owner)) throw new SoundboardBusyError();
+    this.soundOwner = owner;
     const request = Symbol('soundboard-request');
     this.soundRequest = request;
 
@@ -260,10 +273,20 @@ class MusicSession {
     this.clearIdleTimer();
     let audio: AudioStream | null = null;
     let connection: VoiceConnection | null = null;
+    let entranceConnectionState: VoiceConnection['state'] | null = null;
     try {
-      connection = this.ensureConnection(channel);
-      this.registerMusicOwner(connection);
-      await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+      if (entrance) {
+        connection = getVoiceConnection(this.guildId) ?? null;
+        if (!connection || connection.state.status !== VoiceConnectionStatus.Ready || connection.joinConfig.channelId !== channel.id || !entrance.valid()) throw new Error('Entrance connection unavailable.');
+        entranceConnectionState = connection.state;
+        this.connection = connection;
+        this.voiceChannel = channel;
+        this.registerMusicOwner(connection);
+      } else {
+        connection = this.ensureConnection(channel);
+        this.registerMusicOwner(connection);
+        await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+      }
       if (this.soundRequest !== request) {
         throw new Error('Soundboard playback was stopped before it started.');
       }
@@ -278,10 +301,11 @@ class MusicSession {
         fadeInMs: options.fadeInMs,
         fadeOutMs: options.fadeOutMs,
         durationSec: options.durationSec,
+        maxOutputSec: entrance ? 5 : undefined,
       });
       this.currentSoundStream = audio;
       await audio.ready;
-      if (this.soundRequest !== request || this.currentSoundStream !== audio) {
+      if (this.soundRequest !== request || this.currentSoundStream !== audio || !ownsAudio(this.guildId, owner) || (entrance && (this.leaving || Date.now() > entrance.deadline || !entrance.valid() || getVoiceConnection(this.guildId) !== connection || connection.state !== entranceConnectionState || connection.state.status !== VoiceConnectionStatus.Ready || connection.joinConfig.channelId !== channel.id))) {
         throw new Error('Soundboard playback was stopped before it started.');
       }
       const musicStatus = this.player.state.status;
@@ -290,15 +314,18 @@ class MusicSession {
       if (this.musicPausedForSound) this.player.pause();
       connection.subscribe(this.soundPlayer);
       this.soundPlayer.play(createAudioResource(audio.stream, { inputType: StreamType.Raw }));
+      if (entrance) this.soundDeadline = setTimeout(() => this.stopSound(), 5_500);
     } catch (error) {
       if (this.currentSoundStream === audio) this.currentSoundStream = null;
       audio?.destroy();
       if (this.soundRequest === request) this.soundRequest = null;
-      if (this.musicPausedForSound) {
+      if (this.musicPausedForSound && ownsAudio(this.guildId, owner)) {
         this.musicPausedForSound = false;
         connection?.subscribe(this.player);
         this.player.unpause();
       }
+      releaseAudio(this.guildId, owner);
+      if (this.soundOwner === owner) this.soundOwner = null;
       if (!this.leaving && this.hasNothingPlaying()) this.startIdleTimer();
       throw error;
     }
@@ -309,6 +336,14 @@ class MusicSession {
     if (!this.soundRequest && !this.currentSoundStream && !this.musicPausedForSound) return;
     this.soundPlayer.stop(true);
     this.finishSound();
+  }
+
+  stopEntrance(): void {
+    if (this.soundOwner?.kind === 'entrance') this.stopSound();
+  }
+
+  async playEntrance(channel: VoiceBasedChannel, sound: { url: string; durationSec: number; gainDb: number; fadeInMs: number; fadeOutMs: number }, valid: () => boolean, deadline: number, owner: AudioOwner): Promise<void> {
+    await this.playSound(channel, sound.url, { ...sound, fadeInMs: Math.min(sound.fadeInMs, sound.durationSec * 1000), fadeOutMs: Math.min(sound.fadeOutMs, sound.durationSec * 1000), entrance: { valid, deadline, owner } });
   }
 
   /** Play the next track honoring the loop mode. Stops if the queue is empty. */

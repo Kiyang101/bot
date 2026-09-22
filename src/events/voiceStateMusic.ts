@@ -10,7 +10,7 @@
 import { Events, type VoiceState } from 'discord.js';
 import { getVoiceConnection } from '@discordjs/voice';
 import type { BotEvent } from '../types';
-import { musicManager } from '../lib/music/musicSession';
+import { musicManager } from '../features/music/musicSession';
 
 const event: BotEvent = {
   name: Events.VoiceStateUpdate,

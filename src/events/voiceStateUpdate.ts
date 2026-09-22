@@ -1,7 +1,7 @@
 import { Events, EmbedBuilder, type VoiceState } from 'discord.js';
-import { VoiceAction } from '../lib/database';
+import { VoiceAction } from '../infrastructure/database';
 import type { BotEvent } from '../types';
-import * as store from '../lib/voiceLogStore';
+import * as store from '../features/voice-log/store';
 
 const event: BotEvent = {
   name: Events.VoiceStateUpdate,

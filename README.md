@@ -49,22 +49,31 @@ folders, so adding a feature is usually just dropping in a new file.
 
 ```
 discord-bot/
-├── src/
-│   ├── commands/          # One file per slash command (auto-loaded)
-│   ├── events/            # One file per Discord event (auto-loaded)
-│   ├── control/           # Local HTTP endpoint the dashboard talks to
-│   ├── lib/
-│   │   ├── music/         # YouTube music player (yt-dlp, queue, effects)
-│   │   ├── voice/         # Voice-channel audio helpers (ducking)
-│   │   ├── voiceAI/       # TTS/STT/LLM providers + sessions
-│   │   └── supabase.ts     # Server-only Supabase client
-│   ├── deploy-commands.ts # Registers slash commands with Discord
-│   └── index.ts           # Bot entry point
-├── dashboard/             # Next.js web dashboard (npm workspace)
-├── supabase/              # SQL schema migrations
-├── scripts/               # Supabase data import/check scripts
-└── .env.example           # Template for your secrets
+??? src/
+?   ??? app/              # Client wiring, module discovery, startup/lifecycle
+?   ??? commands/         # Slash-command adapters (auto-loaded)
+?   ??? events/           # Discord event adapters (auto-loaded)
+?   ??? control/          # Local HTTP transport and request handlers
+?   ?   ??? handlers/     # Music, speech, and soundboard requests
+?   ??? features/
+?   ?   ??? music/        # Sessions, queue, effects, yt-dlp, Discord player UI
+?   ?   ??? speech/       # TTS playback, translation, and providers
+?   ?   ??? voice-log/    # Voice activity persistence
+?   ??? audio/            # Shared PCM mixer and music/speech ducking
+?   ??? infrastructure/   # Supabase client, database helpers, runtime state
+?   ??? types.ts          # Discord command/event interfaces
+?   ??? deploy-commands.ts
+?   ??? index.ts          # Loads environment and starts the application
+??? dashboard/            # Next.js web dashboard (npm workspace)
+??? test/                 # Bot and cross-application regression tests
+??? docs/architecture.md  # Boundaries and guide to adding features
+??? supabase/             # SQL schema migrations
+??? scripts/              # Supabase data import/check scripts
+??? .env.example
 ```
+
+See [the architecture guide](docs/architecture.md) for module responsibilities,
+dependency boundaries, and the development workflow.
 
 ## Setup
 
@@ -230,7 +239,12 @@ BOT_START_COMMAND=npm run prod
 | `npm run serve` | Run the already-compiled build (`node dist/index.js`). |
 | `npm run build` / `npm run typecheck` | Compile / type-check only. |
 | `npm run deploy` | Register slash commands with Discord. |
-| `npm test` | Run the database/auth unit tests. |
+| `npm test` | Run bot and cross-application regression tests. |
+| `npm run dev:dashboard` | Start the dashboard from the repository root. |
+| `npm run build:all` | Build the bot and dashboard. |
+| `npm run typecheck:all` | Type-check the bot and dashboard. |
+| `npm run test:all` | Run root tests, then dashboard tests. |
+| `npm run check` | Run all type checks and tests (stops on failure). |
 
 ## Notes
 
@@ -241,3 +255,32 @@ BOT_START_COMMAND=npm run prod
 ## License
 
 MIT
+# Personal entrance sounds
+
+Members can choose a short clip at **Soundboard → My entrance sound** for each
+server and explicitly enable it. The clip plays once when they join or move into
+the voice channel where the bot is already connected and ready. The bot never
+joins a channel for an entrance. Clips must have a known duration of 0.1–5
+seconds; playback is capped at 5 seconds. Entrances are skipped while another
+sound or speech is active. Playing music pauses for the clip and resumes after it.
+Each member has a 60-second cooldown and each server a shared 5-second cooldown.
+Cooldowns are held in memory and reset when the bot restarts.
+
+Apply `supabase/migrations/20260921000000_voice_entrance_preference.sql` before
+deploying the updated dashboard and bot. For rollback, remove or disable the
+`voiceStateEntrance` event adapter and revert the feature code; leave the
+additive preference table in place to preserve settings.
+
+For optional synthesized speech, apply
+`supabase/migrations/20260922000000_voice_entrance_speech.sql` after the first
+entrance migration and before deploying the Phase 2 dashboard and bot. Choose
+**Synthesized speech** on the entrance page, enter up to 80 characters, choose
+a supported Google TTS language or an available VOICEVOX speaker, and save.
+The running bot's private preview endpoint generates the clip once when text
+or voice changes; the dashboard validates and stores a 0.1–5 second WAV in the
+private `sounds` bucket. Joining voice only reads that asset and uses the same
+five second playback cap and cooldowns. Saving speech requires the bot and its
+selected speech engine to be running. Longer speech is rejected; shorten the
+text and save again. Old generated assets are queued for cleanup and retried by
+the dashboard worker. Switching back to a Soundboard clip retires the speech
+asset. Existing sound selections remain in sound mode after migration.

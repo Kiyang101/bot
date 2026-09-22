@@ -309,6 +309,8 @@ export interface StreamOptions {
   fadeOutMs?: number;
   /** Required to place a fade-out at the end of a one-shot clip. */
   durationSec?: number;
+  /** Hard decoder output limit for short entrance clips. */
+  maxOutputSec?: number;
 }
 
 /**
@@ -488,6 +490,7 @@ export function createAudioStream(opts: StreamOptions): AudioStream {
         '-reconnect_delay_max', '5',
         ...(seekSec > 0 ? ['-ss', String(seekSec)] : []),
         '-i', opts.url,
+        ...(opts.maxOutputSec ? ['-t', String(opts.maxOutputSec)] : []),
         ...outputArgs,
       ],
       { stdio: ['ignore', 'pipe', 'pipe'] },

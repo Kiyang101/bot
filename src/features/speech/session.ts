@@ -30,7 +30,8 @@ import { Readable } from 'node:stream';
 import type { VoiceBasedChannel } from 'discord.js';
 import { synthesize } from './tts';
 import type { TtsProvider } from './providers/types';
-import { duck, resume as resumeMusic, isMusicActive } from '../voice/ducking';
+import { duck, resume as resumeMusic, isMusicActive } from '../../audio/ducking';
+import { claimSpeech, ownsAudio, releaseAudio, type AudioOwner } from '../../audio/oneShotOwnership';
 
 /** One queued speak request. Resolves when this clip finishes playing. */
 interface SpeakItem {
@@ -47,6 +48,7 @@ class SpeakSession {
   private player: AudioPlayer | null = null;
   private queue: SpeakItem[] = [];
   private processing = false;
+  private owner: AudioOwner | null = null;
 
   /**
    * Ensure we have a live connection + player in the requested channel.
@@ -116,6 +118,12 @@ class SpeakSession {
   private async processQueue(): Promise<void> {
     if (this.processing) return;
     this.processing = true;
+    const guildId = this.queue[0]?.channel.guild.id;
+    const owner: AudioOwner = { kind: 'speech' };
+    if (guildId) {
+      claimSpeech(guildId, owner);
+      this.owner = owner;
+    }
     try {
       while (this.queue.length > 0) {
         const item = this.queue.shift()!;
@@ -127,6 +135,8 @@ class SpeakSession {
         }
       }
     } finally {
+      if (guildId) releaseAudio(guildId, owner);
+      if (this.owner === owner) this.owner = null;
       this.processing = false;
     }
   }
@@ -141,7 +151,7 @@ class SpeakSession {
     try {
       await this.playOneInner(item);
     } finally {
-      resumeMusic(guildId);
+      if (this.owner && ownsAudio(guildId, this.owner)) resumeMusic(guildId);
     }
   }
 

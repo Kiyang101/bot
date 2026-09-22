@@ -13,7 +13,7 @@
  * FFmpeg (StreamType.Arbitrary) in session.ts.
  *
  * NOTE: VOICEVOX only speaks Japanese. Non-Japanese input should be
- * translated first (see lib/voiceAI/translate.ts).
+ * translated first (see features/speech/translate.ts).
  */
 
 import type { TtsProvider } from './types';
@@ -98,7 +98,7 @@ export function createVoicevoxTTS(
         // Step 1: build the audio query for this text + speaker.
         const queryRes = await fetch(
           `${root}/audio_query?text=${encodeURIComponent(text)}&speaker=${speaker}`,
-          { method: 'POST' },
+          { method: 'POST', signal: AbortSignal.timeout(20_000) },
         );
         if (!queryRes.ok) {
           console.error(`[tts:voicevox] audio_query error ${queryRes.status}: ${await queryRes.text()}`);
@@ -125,6 +125,7 @@ export function createVoicevoxTTS(
         // Step 2: synthesize WAV audio from the query.
         const synthRes = await fetch(`${root}/synthesis?speaker=${speaker}`, {
           method: 'POST',
+          signal: AbortSignal.timeout(60_000),
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(query),
         });

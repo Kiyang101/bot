@@ -1,5 +1,5 @@
-import { getSupabaseAdmin } from './supabase';
-import { assertSupabaseResult, VoiceAction, type VoiceAction as VoiceActionType } from './database';
+import { getSupabaseAdmin } from '../../infrastructure/supabase';
+import { assertSupabaseResult, VoiceAction, type VoiceAction as VoiceActionType } from '../../infrastructure/database';
 
 const now = () => new Date().toISOString();
 

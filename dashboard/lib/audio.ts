@@ -16,7 +16,7 @@ type TrimSourceFileInput = {
   source: Buffer | Uint8Array;
   mimeType: string;
   trimStartMs: number;
-  trimEndMs: number;
+  trimEndMs: number | null;
 };
 
 type ProcessResult = { exitCode: number | null; stderr: string };
@@ -122,12 +122,13 @@ function runFfmpeg(args: string[]): Promise<ProcessResult> {
   const command = bundledFfmpegPath();
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const timeout = setTimeout(() => child.kill(), 12_000);
     let stderr = '';
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-    child.once('error', () => reject(new Error(AUDIO_PROCESSING_UNAVAILABLE)));
-    child.once('close', (exitCode) => resolve({ exitCode, stderr }));
+    child.once('error', () => { clearTimeout(timeout); reject(new Error(AUDIO_PROCESSING_UNAVAILABLE)); });
+    child.once('close', (exitCode) => { clearTimeout(timeout); resolve({ exitCode, stderr }); });
   });
 }
 
@@ -170,9 +171,12 @@ export async function trimSourceFile(input: TrimSourceFileInput): Promise<{
   try {
     await writeFile(sourcePath, input.source);
     const sourceDurationSec = await readDurationSeconds(sourcePath);
+    if (input.trimEndMs === null && (sourceDurationSec < 0.1 || sourceDurationSec > 5)) {
+      throw new Error('Synthesized speech must be between 0.1 and 5 seconds. Shorten the text.');
+    }
     const range = validateTrimRange({
       trimStartMs: input.trimStartMs,
-      trimEndMs: input.trimEndMs,
+      trimEndMs: input.trimEndMs ?? sourceDurationSec * 1_000,
       sourceDurationMs: sourceDurationSec * 1_000,
     });
     if (!range.ok) throw new Error(range.message);

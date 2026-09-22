@@ -25,8 +25,9 @@ and the server-only `SUPABASE_SECRET_KEY` before anything that touches the DB.
 
 ## Architecture
 
-- **Entry point:** `src/index.ts` creates the client, auto-loads every module in
-  `src/commands/` and `src/events/`, then logs in and starts the control server.
+- **Entry point:** `src/index.ts` loads the environment and calls `src/app/start.ts`.
+  `src/app/client.ts` creates the client; `src/app/modules.ts` loads commands/events
+  and is also used by command deployment. Startup owns login and lifecycle signals.
 - **Commands** (`src/commands/*.ts`): each file `export default`s a `Command`
   (`{ data: SlashCommandBuilder, execute(interaction) }`). Dropping in a new file
   registers it automatically — but you must run `npm run deploy` for Discord to
@@ -34,13 +35,14 @@ and the server-only `SUPABASE_SECRET_KEY` before anything that touches the DB.
 - **Events** (`src/events/*.ts`): each `export default`s a `BotEvent`
   (`{ name, once?, execute }`). No deploy needed.
 - **Shared types** live in `src/types.ts`.
-- **Music** (`src/lib/music/`): `musicSession.ts` holds per-guild sessions;
+- **Music** (`src/features/music/`): `musicSession.ts` holds per-guild sessions;
   `ytdlp.ts` resolves tracks via `youtube-dl-exec`. Effects/queue/loop state is
   in `types.ts`; Discord UI (buttons/embeds) in `components.ts`/`ui.ts`.
-- **Voice/TTS** (`src/lib/voiceAI/`): provider abstraction under `providers/`
+- **Voice/TTS** (`src/features/speech/`): provider abstraction under `providers/`
   (openai, gemini, voicevox, googletts) selected via env. `tts.ts`/`session.ts`
   drive synthesis and playback; `translate.ts` does Google-Translate-to-Japanese.
-- **Control endpoint** (`src/control/server.ts`): a `127.0.0.1`-only HTTP server
+- **Control endpoint** (`src/control/server.ts`, handlers under
+  `src/control/handlers/`): a `127.0.0.1`-only HTTP server
   guarded by `BOT_CONTROL_SECRET`. Exposes `/speak`, `/preview`, `/leave`,
   `/music`, and `/music/state` so the dashboard can drive the bot.
 - **Database:** Supabase Postgres. `supabase/migrations/` is the source of truth,
@@ -50,16 +52,20 @@ and the server-only `SUPABASE_SECRET_KEY` before anything that touches the DB.
   reads Supabase through its SSR client and calls the bot's control endpoint for
   live actions. Supabase Auth provides Discord OAuth sessions.
 
+See `docs/architecture.md` for the full directory map and extension workflow.
+Shared audio lives in `src/audio/`; database access helpers and runtime persistence
+live in `src/infrastructure/`; voice logging lives in `src/features/voice-log/`.
+
 ## Conventions
 
-- TypeScript throughout; CommonJS (`require`-based auto-loader in `index.ts`), so
+- TypeScript throughout; CommonJS (`require`-based auto-loader in `src/app/modules.ts`), so
   keep `import`/`export default` consistent with existing files.
 - Match the existing comment style: short "why" comments explaining non-obvious
   decisions, not narration of what the code does.
 - Config is read from `.env` via `dotenv`. Document any new env var in
   `.env.example` with an inline comment, following the existing sectioned format.
 - Prefer failing with a clear, actionable message (see the env-var guards in
-  `index.ts` and `control/server.ts`) over silent failure.
+  `src/app/start.ts` and `src/control/server.ts`) over silent failure.
 - Apply SQL changes from `supabase/migrations/` in the Supabase SQL Editor.
 
 ## Gotchas
@@ -72,7 +78,7 @@ and the server-only `SUPABASE_SECRET_KEY` before anything that touches the DB.
 - **Don't commit secrets.** `.env` and `dashboard/.env.local` are git-ignored.
 - The bot only requests `Guilds` and `GuildVoiceStates` intents. Reading message
   text would require enabling the Message Content intent and adding it in
-  `index.ts`.
-- `unhandledRejection`/`uncaughtException` are caught in `index.ts` on purpose so
+  `src/app/client.ts`.
+- `unhandledRejection`/`uncaughtException` are caught in `src/app/start.ts` on purpose so
   a stray killed yt-dlp/ffmpeg child can't take the whole bot offline — keep that
   safety net intact.

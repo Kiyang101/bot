@@ -26,6 +26,7 @@ export default function ServerSelector({
     startTransition(async () => {
       await selectGuild(guildId);
       router.push(destination);
+      router.refresh();
     });
   }
 

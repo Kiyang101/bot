@@ -92,24 +92,38 @@ function canViewAndConnect(
 
 async function discordFetch<T>(path: string): Promise<T> {
   if (!TOKEN) throw new Error('DISCORD_TOKEN is not set');
-  const res = await fetch(`${API}${path}`, {
-    headers: { Authorization: `Bot ${TOKEN}` },
-    cache: 'no-store',
-  });
-  if (!res.ok) {
-    throw new Error(`Discord API ${res.status}: ${await res.text()}`);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const res = await fetch(`${API}${path}`, {
+      headers: { Authorization: `Bot ${TOKEN}` },
+      cache: 'no-store',
+    });
+    if (res.status === 429 && attempt < 2) {
+      const body = await res.json().catch(() => ({})) as { retry_after?: number };
+      const retryMs = Math.min(2_000, Math.max(100, Math.ceil((body.retry_after ?? 1) * 1_000)));
+      await new Promise((resolve) => setTimeout(resolve, retryMs));
+      continue;
+    }
+    if (!res.ok) throw new Error(`Discord API ${res.status}: ${await res.text()}`);
+    return res.json() as Promise<T>;
   }
-  return res.json() as Promise<T>;
+  throw new Error('Discord API rate limit exceeded.');
 }
 
 /** Lists every server the bot is a member of (for the server selection page). */
+let guildCache: { value: Guild[]; expiresAt: number } | null = null;
+let guildRequest: Promise<Guild[]> | null = null;
 export async function listGuilds(): Promise<Guild[]> {
-  const guilds = await discordFetch<Array<{ id: string; name: string; icon: string | null }>>(
-    `/users/@me/guilds`,
-  );
-  return guilds
-    .map((g) => ({ id: g.id, name: g.name, icon: g.icon }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  if (guildCache && guildCache.expiresAt > Date.now()) return guildCache.value;
+  if (guildRequest) return guildRequest;
+  guildRequest = (async () => {
+    const guilds = await discordFetch<Array<{ id: string; name: string; icon: string | null }>>('/users/@me/guilds');
+    const value = guilds
+      .map((g) => ({ id: g.id, name: g.name, icon: g.icon }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    guildCache = { value, expiresAt: Date.now() + 15_000 };
+    return value;
+  })();
+  try { return await guildRequest; } finally { guildRequest = null; }
 }
 
 /**

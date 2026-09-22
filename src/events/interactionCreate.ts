@@ -5,7 +5,7 @@ import {
   type InteractionReplyOptions,
 } from 'discord.js';
 import type { BotEvent } from '../types';
-import { handleMusicComponent } from '../lib/music/components';
+import { handleMusicComponent } from '../features/music/components';
 
 const event: BotEvent = {
   name: Events.InteractionCreate,

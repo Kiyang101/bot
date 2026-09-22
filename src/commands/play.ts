@@ -4,11 +4,11 @@ import {
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import type { Command } from '../types';
-import { resolve } from '../lib/music/ytdlp';
-import { musicManager } from '../lib/music/musicSession';
-import { requireGuildVoice } from '../lib/music/guards';
-import { searchSelect, formatDuration } from '../lib/music/ui';
-import { registerSearch } from '../lib/music/components';
+import { resolve } from '../features/music/ytdlp';
+import { musicManager } from '../features/music/musicSession';
+import { requireGuildVoice } from '../features/music/guards';
+import { searchSelect, formatDuration } from '../features/music/ui';
+import { registerSearch } from '../features/music/components';
 
 /**
  * `/play <query>` — play YouTube audio.
@@ -16,7 +16,7 @@ import { registerSearch } from '../lib/music/components';
  * Accepts a video URL, a playlist URL, or free-text search. URLs/playlists are
  * enqueued immediately; a search shows a
  * 5-result picker (handled by the
- * `music:pick` component in src/lib/music/components.ts).
+ * `music:pick` component in src/features/music/components.ts).
  */
 const command: Command = {
   data: new SlashCommandBuilder()

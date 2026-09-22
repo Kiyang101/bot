@@ -12,7 +12,12 @@
     "deploy": "tsx src/deploy-commands.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "dev:dashboard": "npm run dev --workspace dashboard",
+    "build:all": "npm run build && npm run build --workspace dashboard",
+    "typecheck:all": "npm run typecheck && npm run typecheck --workspace dashboard",
+    "test:all": "npm test && npm test --workspace dashboard",
+    "check": "npm run typecheck:all && npm run test:all"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -1,6 +1,6 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { Command } from '../types';
-import { requireSession } from '../lib/music/guards';
+import { requireSession } from '../features/music/guards';
 
 const command: Command = {
   data: new SlashCommandBuilder().setName('shuffle').setDescription('Shuffle the queue.'),

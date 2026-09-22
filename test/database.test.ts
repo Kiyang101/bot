@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertSupabaseResult, DatabaseError } from '../src/lib/database';
+import { assertSupabaseResult, DatabaseError } from '../src/infrastructure/database';
 
 test('assertSupabaseResult turns a Supabase error into an actionable DatabaseError', () => {
   assert.throws(

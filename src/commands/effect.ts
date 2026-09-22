@@ -1,7 +1,7 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { Command } from '../types';
-import { requireSession } from '../lib/music/guards';
-import { EFFECTS, EFFECT_LABELS, type Effect } from '../lib/music/types';
+import { requireSession } from '../features/music/guards';
+import { EFFECTS, EFFECT_LABELS, type Effect } from '../features/music/types';
 
 const command: Command = {
   data: new SlashCommandBuilder()

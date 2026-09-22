@@ -19,6 +19,8 @@ export interface BotRuntime {
 
 export interface SpeakPayload {
   channelId: string;
+  guildId: string;
+  userId?: string;
   text: string;
   voice?: string;
   provider?: 'default' | 'voicevox' | 'google';
@@ -107,7 +109,7 @@ export async function sendSpeak(payload: SpeakPayload): Promise<{ spoken: string
 }
 
 /** A preview request — same shape as a speak, minus the voice channel. */
-export type PreviewPayload = Omit<SpeakPayload, 'channelId'>;
+export type PreviewPayload = Omit<SpeakPayload, 'channelId' | 'guildId' | 'userId'>;
 
 export interface PreviewResult {
   audio: ArrayBuffer;
@@ -132,8 +134,12 @@ export async function sendPreview(payload: PreviewPayload): Promise<PreviewResul
       },
       body: JSON.stringify(payload),
       cache: 'no-store',
+      signal: AbortSignal.timeout(12_000),
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+      throw new Error('Speech synthesis timed out. Try shorter text or check the speech provider.');
+    }
     throw new Error(
       `Could not reach the bot at ${CONTROL_URL}. Make sure the bot is running and BOT_CONTROL_PORT matches.`,
     );

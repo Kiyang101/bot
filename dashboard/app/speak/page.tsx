@@ -13,18 +13,14 @@ export default async function SpeakPage() {
   ]);
 
   return (
-    <main>
-      <a className="back-button" href="/servers">← Select server</a>
+    <main className="speak-page">
+      <a className="back-button" href="/servers">← เลือกเซิร์ฟเวอร์</a>
       <h1>Speak</h1>
-      <p className="sub">Type a message and the bot will say it out loud in a voice channel.</p>
+      <p className="sub">เปลี่ยนข้อความเป็นเสียงพูด ทดลองฟังก่อนส่ง หรือให้ VOICEVOX พูดเป็นภาษาญี่ปุ่น</p>
 
-      <SpeakForm channels={channels} voicevoxVoices={voicevoxVoices} />
+      <SpeakForm key={guildId ?? "none"} channels={channels} voicevoxVoices={voicevoxVoices} defaultProvider={process.env.AI_TTS_PROVIDER ?? "openai"} />
 
-      <p className="hint">
-        {channels.length === 0
-          ? 'No voice channels found — check the bot token / that the bot is in the server.'
-          : `${channels.length} voice channels available. The bot joins the channel you pick and speaks.`}
-      </p>
+
     </main>
   );
 }

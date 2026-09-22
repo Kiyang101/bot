@@ -1,7 +1,7 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { Command } from '../types';
-import { requireSession } from '../lib/music/guards';
-import type { LoopMode } from '../lib/music/types';
+import { requireSession } from '../features/music/guards';
+import type { LoopMode } from '../features/music/types';
 
 const LABEL: Record<LoopMode, string> = {
   off: '➡️ Loop off',

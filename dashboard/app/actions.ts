@@ -137,6 +137,7 @@ export async function saveLogChannel(formData: FormData) {
 export interface SpeakState {
   ok: boolean;
   message: string;
+  spoken?: string;
 }
 
 export interface SpeakInput {
@@ -155,24 +156,29 @@ export interface SpeakInput {
  * `<form action>`, so React 19 doesn't auto-reset the form fields.
  */
 export async function speak(input: SpeakInput): Promise<SpeakState> {
+  const user = await getSessionUser();
+  if (!user) return { ok: false, message: 'กรุณาเข้าสู่ระบบก่อน' };
+  const guildId = await getSelectedGuildId();
+  if (!guildId) return { ok: false, message: 'กรุณาเลือกเซิร์ฟเวอร์ก่อน' };
   const channelId = input.channelId ?? '';
   const text = (input.text ?? '').trim();
   const voice = input.voice?.trim() || undefined;
   const provider =
     input.provider === 'voicevox' ? 'voicevox' : input.provider === 'google' ? 'google' : 'default';
-  const translate = !!input.translate;
+  const translate = input.translate;
   // Speed/pitch only matter for VOICEVOX.
-  const speed = provider === 'voicevox' ? input.speed : undefined;
-  const pitch = provider === 'voicevox' ? input.pitch : undefined;
+  const speed = provider !== 'google' ? input.speed : undefined;
+  const pitch = provider !== 'google' ? input.pitch : undefined;
 
-  if (!channelId) return { ok: false, message: 'Pick a voice channel first.' };
   if (!text) return { ok: false, message: 'Type a message to speak.' };
 
   try {
-    const { spoken } = await sendSpeak({ channelId, text, voice, provider, translate, speed, pitch });
-    const note = translate && spoken !== text ? ` → 🇯🇵 ${spoken}` : '';
-    return { ok: true, message: `🔊 Spoke: "${text}"${note}` };
+    const { spoken } = await sendSpeak({ guildId, ...(channelId ? { channelId } : { channelId: '', userId: user.id }), text, voice, provider, translate, speed, pitch });
+    return { ok: true, message: 'ส่งเสียงเข้าห้องแล้ว', spoken };
   } catch (err) {
+    if (err instanceof Error && err.message.includes('You must be in a voice channel')) {
+      return { ok: false, message: 'กรุณาเข้าห้องเสียงใน Discord ก่อน หรือเลือกห้องจากรายการ' };
+    }
     return { ok: false, message: `❌ ${err instanceof Error ? err.message : 'Failed to speak.'}` };
   }
 }
@@ -197,9 +203,9 @@ export async function previewSpeak(input: SpeakInput): Promise<PreviewState> {
   const voice = input.voice?.trim() || undefined;
   const provider =
     input.provider === 'voicevox' ? 'voicevox' : input.provider === 'google' ? 'google' : 'default';
-  const translate = !!input.translate;
-  const speed = provider === 'voicevox' ? input.speed : undefined;
-  const pitch = provider === 'voicevox' ? input.pitch : undefined;
+  const translate = input.translate;
+  const speed = provider !== 'google' ? input.speed : undefined;
+  const pitch = provider !== 'google' ? input.pitch : undefined;
 
   if (!text) return { ok: false, message: 'Type a message to preview.' };
 
@@ -212,10 +218,9 @@ export async function previewSpeak(input: SpeakInput): Promise<PreviewState> {
       speed,
       pitch,
     });
-    const note = translate && spoken !== text ? ` → 🇯🇵 ${spoken}` : '';
     return {
       ok: true,
-      message: `🎧 Preview ready — playing here only${note}`,
+      message: 'เสียงตัวอย่างพร้อมแล้ว • ได้ยินเฉพาะในเบราว์เซอร์นี้',
       audioBase64: Buffer.from(audio).toString('base64'),
       contentType,
       spoken,

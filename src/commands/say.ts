@@ -5,8 +5,8 @@ import {
   type GuildMember,
 } from 'discord.js';
 import type { Command } from '../types';
-import { voiceSession } from '../lib/voiceAI/session';
-import { getSelectedProviders, resolveApiKey, ttsVoiceChoices } from '../lib/voiceAI/providers/config';
+import { voiceSession } from '../features/speech/session';
+import { getSelectedProviders, resolveApiKey, ttsVoiceChoices } from '../features/speech/providers/config';
 
 /**
  * Voice choices for the dropdown, based on whichever TTS provider is

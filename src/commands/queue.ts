@@ -1,7 +1,7 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { Command } from '../types';
-import { requireSession } from '../lib/music/guards';
-import { queueEmbed } from '../lib/music/ui';
+import { requireSession } from '../features/music/guards';
+import { queueEmbed } from '../features/music/ui';
 
 const command: Command = {
   data: new SlashCommandBuilder().setName('queue').setDescription('Show the current music queue.'),

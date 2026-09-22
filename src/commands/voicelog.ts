@@ -6,7 +6,7 @@ import {
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import type { Command } from '../types';
-import * as store from '../lib/voiceLogStore';
+import * as store from '../features/voice-log/store';
 
 const command: Command = {
   data: new SlashCommandBuilder()

@@ -6,10 +6,10 @@ import {
   type GuildMember,
 } from 'discord.js';
 import type { Command } from '../types';
-import { voiceSession } from '../lib/voiceAI/session';
-import { resolveVoicevoxUrl, resolveTtsVoice } from '../lib/voiceAI/providers/config';
-import { createVoicevoxTTS, fetchVoicevoxSpeakers } from '../lib/voiceAI/providers/voicevox';
-import { translateToJapanese } from '../lib/voiceAI/translate';
+import { voiceSession } from '../features/speech/session';
+import { resolveVoicevoxUrl, resolveTtsVoice } from '../features/speech/providers/config';
+import { createVoicevoxTTS, fetchVoicevoxSpeakers } from '../features/speech/providers/voicevox';
+import { translateToJapanese } from '../features/speech/translate';
 
 /**
  * Does the text contain any Japanese characters (hiragana, katakana — incl.

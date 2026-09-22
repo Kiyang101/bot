@@ -1,12 +1,9 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   REST,
   Routes,
-  type RESTPostAPIApplicationCommandsJSONBody,
 } from 'discord.js';
 import { config } from 'dotenv';
-import type { Command } from './types';
+import { loadCommands } from './app/modules';
 
 config(); // load .env
 
@@ -19,18 +16,7 @@ if (!token || !clientId) {
   process.exit(1);
 }
 
-const commands: RESTPostAPIApplicationCommandsJSONBody[] = [];
-const commandsPath = path.join(__dirname, 'commands');
-const files = fs
-  .readdirSync(commandsPath)
-  .filter((f) => (f.endsWith('.ts') || f.endsWith('.js')) && !f.endsWith('.d.ts'));
-
-for (const file of files) {
-  const command = require(path.join(commandsPath, file)).default as Command | undefined;
-  if (command?.data && typeof command.execute === 'function') {
-    commands.push(command.data.toJSON());
-  }
-}
+const commands = loadCommands().map((command) => command.data.toJSON());
 
 const rest = new REST().setToken(token);
 

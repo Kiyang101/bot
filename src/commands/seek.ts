@@ -1,6 +1,6 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { Command } from '../types';
-import { requireSession } from '../lib/music/guards';
+import { requireSession } from '../features/music/guards';
 
 /** Parse "90", "1:30", or "1:02:03" into seconds, or null if unparseable. */
 function parseTime(input: string): number | null {

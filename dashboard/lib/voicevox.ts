@@ -15,7 +15,7 @@ interface VoicevoxSpeaker {
 /** Fetch & flatten the engine's speakers into one entry per talk style. */
 export async function listVoicevoxSpeakers(): Promise<VoicevoxVoice[]> {
   const root = VOICEVOX_URL.replace(/\/+$/, '');
-  const res = await fetch(`${root}/speakers`, { cache: 'no-store' });
+  const res = await fetch(`${root}/speakers`, { cache: 'no-store', signal: AbortSignal.timeout(4_000) });
   if (!res.ok) throw new Error(`VOICEVOX /speakers HTTP ${res.status}`);
 
   const data = (await res.json()) as VoicevoxSpeaker[];
