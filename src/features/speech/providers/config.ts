@@ -11,7 +11,7 @@ export type BrainProviderName = 'anthropic' | 'openai' | 'gemini' | 'openrouter'
 export type SttProviderName = 'openai' | 'gemini';
 // 'voicevox' is a local, keyless TTS engine (anime-style Japanese voices).
 // 'googletts' is Google Translate's free, keyless TTS (Thai + many languages).
-export type TtsProviderName = 'openai' | 'gemini' | 'voicevox' | 'googletts';
+export type TtsProviderName = 'openai' | 'gemini' | 'voicevox' | 'googletts' | 'local';
 
 /** All providers that exist in the system, including ones that can't do audio. */
 export type AnyProviderName = BrainProviderName | SttProviderName | TtsProviderName;
@@ -33,12 +33,14 @@ export const DEFAULTS = {
     gemini: 'gemini-2.5-flash-preview-tts',
     voicevox: '', // VOICEVOX selects voice by speaker id, not a model name
     googletts: '', // Google TTS selects by language code, not a model name
+    local: '',
   },
   ttsVoice: {
     openai: 'alloy',
     gemini: 'Kore',
     voicevox: '3', // ずんだもん (Zundamon) Normal — default anime girl voice
     googletts: 'th', // default language: Thai
+    local: 'f_young_clear',
   },
 } as const;
 
@@ -83,6 +85,7 @@ const VOICEVOX_SPEAKERS: { name: string; id: string }[] = [
  * API providers the value is the voice name itself.
  */
 export function ttsVoiceChoices(provider: TtsProviderName): { name: string; value: string }[] {
+  if (provider === 'local') return [{ name: 'Wayu female clear', value: 'f_young_clear' }];
   if (provider === 'voicevox') {
     return VOICEVOX_SPEAKERS.map((s) => ({ name: s.name, value: s.id }));
   }
@@ -105,6 +108,7 @@ const PROVIDER_KEY_ENV: Record<AnyProviderName, string> = {
   openrouter: 'OPENROUTER_API_KEY',
   voicevox: 'VOICEVOX_URL', // VOICEVOX needs no key; this entry only satisfies the type
   googletts: 'GTTS_LANG', // Google TTS needs no key; this entry only satisfies the type
+  local: 'LOCAL_TTS_URL', // local service is keyless
 };
 
 /** Languages offered for Google TTS (label → BCP-47-ish code). Thai first. */
@@ -162,13 +166,14 @@ function asTtsProvider(v: string | null): TtsProviderName {
   const lower = (v ?? 'openai').toLowerCase();
   if (lower === 'openai' || lower === 'gemini' || lower === 'voicevox') return lower;
   if (lower === 'googletts') return 'googletts';
+  if (lower === 'local') return 'local';
   if (lower === 'anthropic' || lower === 'openrouter') {
     throw new Error(
-      `[voiceAI] AI_TTS_PROVIDER="${v}" does not support audio. Use openai, gemini, voicevox, or googletts.`,
+        `[voiceAI] AI_TTS_PROVIDER="${v}" does not support audio. Use openai, gemini, voicevox, googletts, or local.`,
     );
   }
   throw new Error(
-    `[voiceAI] Unknown AI_TTS_PROVIDER="${v}". Allowed: openai, gemini, voicevox, googletts.`,
+    `[voiceAI] Unknown AI_TTS_PROVIDER="${v}". Allowed: openai, gemini, voicevox, googletts, local.`,
   );
 }
 
@@ -227,5 +232,6 @@ export function resolveModel(
 
 /** Read `AI_TTS_VOICE` or fall back to the provider default. */
 export function resolveTtsVoice(provider: TtsProviderName): string {
+  if (provider === 'local') return readEnv('LOCAL_TTS_VOICE') ?? DEFAULTS.ttsVoice.local;
   return readEnv('AI_TTS_VOICE') ?? DEFAULTS.ttsVoice[provider];
 }

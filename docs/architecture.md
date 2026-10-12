@@ -16,6 +16,8 @@ the other application's runtime code.
 | `src/control/handlers/` | Validate and execute dashboard requests for each feature. |
 | `src/features/music/` | Music sessions, queues, effects, track resolution, player components. |
 | `src/features/speech/` | Speech playback, translation, synthesis, and TTS providers. |
+| `src/features/chat/` | Serialized Ollama chat, RAM history, text cleanup and live voice guards. |
+| `services/local-tts/` | Isolated CPU Wayu HTTP service, model download and offline smoke checks. |
 | `src/features/voice-log/` | Store and query voice-channel activity. |
 | `src/audio/` | Audio primitives used by multiple features: PCM mixing and ducking. |
 | `src/infrastructure/` | Supabase initialization, database error handling, runtime persistence. |

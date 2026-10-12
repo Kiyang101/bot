@@ -5,7 +5,12 @@ import { loadCommands, loadEvents } from './modules';
 /** Construct and wire the client without logging in or starting any servers. */
 export function createClient(): Client {
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildVoiceStates,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+    ],
   });
   client.commands = new Collection<string, Command>();
 

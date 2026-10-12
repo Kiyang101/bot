@@ -1,0 +1,10 @@
+wayu-tts @ git+https://github.com/wayu-research/wayu-tts-inference.git@07ab898d516649313926f0b843b809a962f993ad
+# Keep tltk's scikit-learn 1.2 binary compatible and Kokoro on its supported API.
+numpy==1.26.4
+transformers==4.51.3
+kokoro==0.9.4
+misaki==0.9.4
+spacy>=3.8,<3.9
+thinc>=8.3,<8.4
+# Imported by tltk.nlp but omitted from tltk's package metadata.
+pandas==2.2.3

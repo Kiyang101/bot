@@ -45,7 +45,7 @@ export interface TtsProvider {
    * native API gives back.
    * `voice` overrides the provider's configured default voice for this one
    * call; when omitted, the default voice is used.
-   * Return an empty Buffer on failure — callers check `.length` before playing.
+   * Throw or return an empty Buffer on failure; playback handles both.
    */
   synthesize(text: string, voice?: string): Promise<Buffer>;
 }

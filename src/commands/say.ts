@@ -39,7 +39,7 @@ function ttsConfigError(): string | null {
   } catch (err: unknown) {
     return err instanceof Error ? err.message : 'Unknown TTS configuration error.';
   }
-  if (tts === 'voicevox') {
+  if (tts === 'voicevox' || tts === 'local' || tts === 'googletts') {
     return null; // keyless local engine
   }
   if (!resolveApiKey('TTS', tts)) {

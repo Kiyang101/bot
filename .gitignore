@@ -23,3 +23,7 @@ data/
 
 # Local git worktrees
 .worktrees/
+
+# Local voice dependencies, model weights and generated test audio
+.local-voice/
+__pycache__/

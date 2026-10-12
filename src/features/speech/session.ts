@@ -39,11 +39,12 @@ interface SpeakItem {
   text: string;
   voice?: string;
   tts?: TtsProvider;
+  beforePlayback?: () => VoiceBasedChannel;
   resolve: () => void;
   reject: (err: unknown) => void;
 }
 
-class SpeakSession {
+export class SpeakSession {
   private connection: VoiceConnection | null = null;
   private player: AudioPlayer | null = null;
   private queue: SpeakItem[] = [];
@@ -107,9 +108,10 @@ class SpeakSession {
     text: string,
     voice?: string,
     tts?: TtsProvider,
+    beforePlayback?: () => VoiceBasedChannel,
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      this.queue.push({ channel, text, voice, tts, resolve, reject });
+      this.queue.push({ channel, text, voice, tts, beforePlayback, resolve, reject });
       void this.processQueue();
     });
   }
@@ -157,6 +159,7 @@ class SpeakSession {
 
   /** The actual synthesize-and-play work, wrapped by music ducking. */
   private async playOneInner(item: SpeakItem): Promise<void> {
+    if (item.beforePlayback) item.channel = item.beforePlayback();
     const connection = this.ensureConnection(item.channel);
 
     // Wait for the UDP handshake to finish before playing.
@@ -174,6 +177,17 @@ class SpeakSession {
           : 'TTS returned no audio — check your AI_TTS_PROVIDER key in .env.',
       );
     }
+
+    // Chat users may leave/move during synthesis or while waiting in this queue.
+    if (item.beforePlayback) {
+      const current = item.beforePlayback();
+      if (current.id !== connection.joinConfig.channelId) {
+        throw new Error('ห้องเสียงเปลี่ยนระหว่างสร้างเสียง กรุณาส่งข้อความใหม่อีกครั้ง');
+      }
+    }
+
+    // Music may have subscribed its player while synthesis was running.
+    connection.subscribe(this.player!);
 
     const player = this.player!;
     const resource = createAudioResource(Readable.from(audio), {
@@ -241,8 +255,9 @@ export const voiceSession = {
     text: string,
     voice?: string,
     tts?: TtsProvider,
+    beforePlayback?: () => VoiceBasedChannel,
   ): Promise<void> {
-    return getSession(channel.guild.id).speak(channel, text, voice, tts);
+    return getSession(channel.guild.id).speak(channel, text, voice, tts, beforePlayback);
   },
   leave(guildId: string): void {
     getSession(guildId).leave(guildId);

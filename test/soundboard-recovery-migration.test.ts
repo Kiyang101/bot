@@ -6,7 +6,7 @@ import { isUploadRecoveryCandidate, resolveUploadRecovery } from '../dashboard/l
 const migration = readFileSync(
   new URL('../supabase/migrations/20260829010000_soundboard_durable_recovery_fixes.sql', import.meta.url),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 const soundsSource = readFileSync(
   new URL('../dashboard/lib/sounds.ts', import.meta.url),
   'utf8',

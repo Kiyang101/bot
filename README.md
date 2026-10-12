@@ -20,7 +20,9 @@ folders, so adding a feature is usually just dropping in a new file.
   the music queue.
 - **🗣️ Text-to-speech** — `/say` makes the bot speak in your voice channel, and
   `/sayjp` speaks in a Japanese anime voice via [VOICEVOX](https://voicevox.hiroshiba.jp/).
-  Pluggable TTS providers (OpenAI, Gemini, VOICEVOX, Google Translate TTS).
+  Pluggable TTS providers (OpenAI, Gemini, VOICEVOX, Google Translate TTS, local Wayu).
+- **💬 Local voice chat** — mention the bot or use `/chat` for Qwen3 replies and
+  Thai/English speech on your own machine. See [local voice setup](docs/local-voice-chat.md).
 - **📋 Voice activity logging** — records who joins/leaves/moves between voice
   channels to Supabase and (optionally) posts it to a text channel. Browse the
   history in the dashboard.
@@ -43,6 +45,7 @@ folders, so adding a feature is usually just dropping in a new file.
 | `/volume` · `/effect` | Set volume (0–100) / apply an audio effect. |
 | `/say` | Make the bot speak a message in your voice channel. |
 | `/sayjp` | Speak your message in a Japanese anime voice (VOICEVOX). |
+| `/chat` · `/chat-reset` | Chat with local Qwen3 / clear your conversation in this text channel. |
 | `/voicelog` | Configure logging of who joins/leaves voice channels. |
 
 ## Project layout

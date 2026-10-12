@@ -76,9 +76,9 @@ live in `src/infrastructure/`; voice logging lives in `src/features/voice-log/`.
 - **`dist/` is build output and git-ignored** — never edit files there; edit
   `src/` and recompile.
 - **Don't commit secrets.** `.env` and `dashboard/.env.local` are git-ignored.
-- The bot only requests `Guilds` and `GuildVoiceStates` intents. Reading message
-  text would require enabling the Message Content intent and adding it in
-  `src/app/client.ts`.
+- The bot requests `Guilds`, `GuildVoiceStates`, `GuildMessages`, and
+  `MessageContent`. Enable Message Content Intent in the Discord Developer
+  Portal for mention chat. See `docs/local-voice-chat.md` for local services.
 - `unhandledRejection`/`uncaughtException` are caught in `src/app/start.ts` on purpose so
   a stray killed yt-dlp/ffmpeg child can't take the whole bot offline — keep that
   safety net intact.

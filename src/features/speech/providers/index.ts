@@ -30,6 +30,7 @@ import { createOpenAITTS } from './openai';
 import { createGeminiTTS } from './gemini';
 import { createVoicevoxTTS } from './voicevox';
 import { createGoogleTTS } from './googletts';
+import { createLocalTTS } from './local';
 
 // Module-level cache. We deliberately cache the *attempt* (including null)
 // so we only print "missing key" warnings once per process per stage.
@@ -37,6 +38,7 @@ let ttsCache: { built: TtsProvider | null } | null = null;
 
 function buildTts(): TtsProvider | null {
   const { tts } = getSelectedProviders();
+  if (tts === 'local') return createLocalTTS();
 
   // VOICEVOX is a local engine — no API key, just a base URL.
   if (tts === 'voicevox') {
@@ -101,6 +103,7 @@ export function missingKeys(): string[] {
     ['STT', selected.stt] as const,
     ['TTS', selected.tts] as const,
   ]) {
+    if (stage === 'TTS' && ['local', 'voicevox', 'googletts'].includes(provider)) continue;
     if (!resolveApiKey(stage, provider)) {
       // Prefer the provider-default key name in the user-facing list.
       const [, providerDefault] = expectedKeyEnvNames(stage, provider);
